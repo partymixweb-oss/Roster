@@ -461,11 +461,20 @@ function staffByIdRaw(id){ return STATE.staff.find(function(s){ return s.id===id
 function server(fn, args){
   if(window.google && google.script && google.script.run){
     return new Promise(function(resolve, reject){
-      var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
+      var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(function(e){
+        if(e && e.message && !/network|connection|HTTP 0/i.test(e.message)) e.serverMessage = e.message;
+        reject(e);
+      });
       runner[fn].apply(runner, args || []);
     });
   }
   return callApi(fn, args);
+}
+// A failed request is either "couldn't connect" or a problem reported by the
+// server — show the real reason for the second so it can be fixed.
+function failMsg(err){
+  if(err && err.serverMessage) return 'Something went wrong on the roster\'s side: ' + err.serverMessage;
+  return 'Couldn\'t reach the roster — check your connection and try again.';
 }
 // Take a roster the server sent back as the new truth.
 function applyServer(res){
@@ -863,11 +872,12 @@ function staffSave(action, payload, successMsg, opts){
     }
     if(res && res.state) applyServer(res); else revertUnsaved();
     toast((res && res.message) || 'That didn\'t save. Please try again.');
-  }, function(){
+  }, function(err){
     setSaving(false);
     revertUnsaved();
-    if(opts.request) showSendToAdmin(opts.request, true);
-    else toast('Couldn\'t reach the roster — check your connection and try again.');
+    if(err && err.serverMessage) toast(failMsg(err));
+    else if(opts.request) showSendToAdmin(opts.request, true);
+    else toast(failMsg(err));
   });
 }
 // Admin changes: run `mutate` (which edits STATE directly) on top of the last
@@ -899,10 +909,10 @@ function adminCommit(mutate, successMsg, opts){
       }
       revertUnsaved();
       toast((res && res.message) || 'That didn\'t save. Please try again.');
-    }, function(){
+    }, function(err){
       setSaving(false);
       revertUnsaved();
-      toast('Couldn\'t reach the roster — check your connection and try again.');
+      toast(failMsg(err));
     });
   }
   attempt(SAVED_STATE_JSON, VERSION);
@@ -1710,7 +1720,7 @@ function onClick(e){
         toast((res && res.message) || 'Incorrect PIN for that name.');
         render();
       }
-    }, function(){ toast('Couldn\'t reach the roster — check your connection.'); render(); });
+    }, function(err){ toast(failMsg(err)); render(); });
     return;
   }
   if(action==='confirm-yes'){ var fn = pendingConfirmAction; hideConfirm(); if(fn) fn(); return; }
@@ -1917,7 +1927,7 @@ function onClick(e){
         toast((res && res.message) || 'Incorrect Admin PIN.');
         render();
       }
-    }, function(){ toast('Couldn\'t reach the roster — check your connection.'); render(); });
+    }, function(err){ toast(failMsg(err)); render(); });
     return;
   }
   if(action==='lock-mgr'){
@@ -1936,14 +1946,14 @@ function onClick(e){
     server('setNotifySettings', [ui.adminPin, settings]).then(function(res){
       if(res && res.ok){ applyServer(res); toast('Email alerts saved.'); }
       else { toast((res && res.message) || 'Couldn\'t save the alerts.'); render(); }
-    }, function(){ toast('Couldn\'t reach the roster — check your connection.'); render(); });
+    }, function(err){ toast(failMsg(err)); render(); });
     return;
   }
   if(action==='test-notify'){
     el.disabled = true; el.textContent = 'Sending…';
     server('sendTestEmail', [ui.adminPin]).then(function(res){
       toast((res && res.message) || 'Couldn\'t send the test email.'); render();
-    }, function(){ toast('Couldn\'t reach the roster — check your connection.'); render(); });
+    }, function(err){ toast(failMsg(err)); render(); });
     return;
   }
   if(action==='change-admin-pin'){
@@ -1960,7 +1970,7 @@ function onClick(e){
         toast((res && res.message) || 'Couldn\'t change the PIN.');
         render();
       }
-    }, function(){ toast('Couldn\'t reach the roster — check your connection.'); render(); });
+    }, function(err){ toast(failMsg(err)); render(); });
     return;
   }
   if(action==='discard-mgr'){ ui.mgrDraft = null; ui.mgrDraftBase = null; render(); return; }
@@ -2244,7 +2254,7 @@ function callApi(fn, args){
     if(!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }).then(function(j){
-    if(j && j.error) throw new Error(j.error);
+    if(j && j.error){ var e = new Error(j.error); e.serverMessage = j.error; throw e; }
     return j ? j.result : null;
   });
 }
