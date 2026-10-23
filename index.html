@@ -530,6 +530,20 @@ function roleClass(r){ return 'role-' + r; }
 // someone is covering a different role for a shift. Falls back to the
 // assigned staff member's usual role for any shift saved before this field
 // existed.
+// Who may pick up an open shift, by the role the shift is for (the server
+// enforces the same rule). Roles not listed can be picked up by anyone.
+var CLAIM_RULES = {supervisor: ['supervisor']};
+function claimAllowedRoles(shift){ return CLAIM_RULES[shiftRole(shift)] || null; }
+function canClaim(shift){
+  var allowed = claimAllowedRoles(shift);
+  if(!allowed) return true;
+  var me = ui.me ? staffById(ui.me) : null;
+  return !!me && allowed.indexOf(me.role) >= 0;
+}
+function claimOnlyLabel(shift){
+  var allowed = claimAllowedRoles(shift);
+  return allowed ? allowed.map(function(r){ return roleLabel(r) + 's'; }).join(' or ') + ' only' : '';
+}
 function shiftRole(shift){
   if(shift.role && ROLE_LABELS[shift.role]) return shift.role;
   var owner = staffById(shift.staffId || shift.originalStaffId);
@@ -709,7 +723,8 @@ function cellViewHTML(ctx, shift){
   } else if(isActiveWeek && ui.me && shift.staffId===ui.me && shift.status==='confirmed'){
     actions += '<button class="btn btn-secondary" data-action="detail-release" data-shift="' + shift.id + '">Release this shift</button>';
   } else if(isActiveWeek && shift.status==='open'){
-    if(ui.me) actions += '<button class="btn btn-primary" data-action="detail-claim" data-shift="' + shift.id + '">Claim this shift</button>';
+    if(ui.me && canClaim(shift)) actions += '<button class="btn btn-primary" data-action="detail-claim" data-shift="' + shift.id + '">Claim this shift</button>';
+    else if(ui.me) actions += '<p class="section-sub" style="margin:0;">🔒 ' + esc(claimOnlyLabel(shift)) + ' can pick up this shift.</p>';
     else actions += '<p class="section-sub" style="margin:0;">Select your name above to claim this shift.</p>';
   }
   if(ui.mgrUnlocked){
@@ -1136,7 +1151,12 @@ function shiftCardHTML(shift, opts){
     actions += editRequestActionsHTML(shift);
   }
   if(opts.claimAction && shift.status==='open'){
-    actions = '<div class="shift-actions"><button class="btn btn-primary" data-action="claim" data-shift="' + shift.id + '">Claim this shift</button></div>';
+    if(ui.me && !canClaim(shift)){
+      actions = '<div class="shift-actions"><span class="badge status-pending">🔒 ' + esc(claimOnlyLabel(shift)) + '</span></div>';
+    } else {
+      actions = '<div class="shift-actions"><button class="btn btn-primary" data-action="claim" data-shift="' + shift.id + '">Claim this shift</button>' +
+        (claimAllowedRoles(shift) ? '<span class="badge status-pending" style="align-self:center;">' + esc(claimOnlyLabel(shift)) + '</span>' : '') + '</div>';
+    }
   }
   var conflictLine = '';
   if(opts.mineActions){
@@ -1211,7 +1231,7 @@ function renderMyShifts(){
   }
   var open = openShifts().filter(function(s){ return s.staffId !== ui.me; });
   out += '<h2 class="section-title" style="margin-top:22px;">Open shifts you could pick up</h2>' +
-    '<p class="section-sub">Anyone can grab these — first tap wins.</p>';
+    '<p class="section-sub">First tap wins. Shift Supervisor shifts can only be picked up by a Shift Supervisor.</p>';
   if(!open.length){
     out += '<div class="empty">No open shifts right now.</div>';
   } else {
@@ -1417,6 +1437,22 @@ function renderManager(){
     '<div style="display:flex; gap:8px; flex-wrap:wrap;">' +
       '<input type="password" inputmode="numeric" id="newAdminPin" maxlength="8" placeholder="New PIN" style="flex:1 1 140px; width:auto;">' +
       '<button class="btn btn-secondary" data-action="change-admin-pin">Change PIN</button>' +
+    '</div></div>';
+
+  var nset = STATE.notify || {emails: [], events: {}};
+  var nev = STATE.notifyEvents || {};
+  out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">Email alerts</h2>' +
+    '<p class="section-sub" style="margin-bottom:10px;">Get an email (from your own Gmail) when staff change things. Separate several addresses with commas.</p>' +
+    '<input type="text" id="notifyEmails" placeholder="you@example.com" value="' + esc((nset.emails || []).join(', ')) + '">' +
+    '<div style="display:flex; flex-direction:column; gap:6px; margin:10px 0 12px;">' +
+      Object.keys(nev).map(function(k){
+        return '<label style="display:flex; align-items:center; gap:8px; font-size:0.85rem; color:var(--ink-soft);">' +
+          '<input type="checkbox" class="notify-ev" data-ev="' + esc(k) + '" style="width:auto;"' + (nset.events && nset.events[k] ? ' checked' : '') + '> ' + esc(nev[k]) + '</label>';
+      }).join('') +
+    '</div>' +
+    '<div style="display:flex; gap:8px; flex-wrap:wrap;">' +
+      '<button class="btn btn-primary" data-action="save-notify">Save alerts</button>' +
+      '<button class="btn btn-secondary" data-action="test-notify">Send test email</button>' +
     '</div></div>';
 
   var pendingReqs = pendingEditRequests();
@@ -1643,6 +1679,7 @@ function releaseShift(id){
 function claimShift(id){
   var s = STATE.shifts.find(function(x){ return x.id===id; });
   if(!ui.me){ toast('Select your name first.'); return; }
+  if(s && s.status==='open' && !canClaim(s)){ toast('Only ' + claimOnlyLabel(s).replace(/ only$/, '') + ' can pick up this shift.'); return; }
   if(s && s.status==='open'){
     var req = 'Hi, it\'s ' + staffNameMe() + ' — I\'d like to pick up the open shift on ' + shiftDesc(s) + '.';
     s.staffId = ui.me; s.status='confirmed'; render();
@@ -1889,6 +1926,24 @@ function onClick(e){
     // Drop the admin-only details (PINs, pay rates, contacts) from this screen.
     server('getState', []).then(applyServer, function(){});
     render();
+    return;
+  }
+  if(action==='save-notify'){
+    var evs = {};
+    Array.prototype.forEach.call(document.querySelectorAll('.notify-ev'), function(cb){ evs[cb.getAttribute('data-ev')] = cb.checked; });
+    var settings = {emails: document.getElementById('notifyEmails').value, events: evs, appUrl: ROSTER_LINK};
+    el.disabled = true;
+    server('setNotifySettings', [ui.adminPin, settings]).then(function(res){
+      if(res && res.ok){ applyServer(res); toast('Email alerts saved.'); }
+      else { toast((res && res.message) || 'Couldn\'t save the alerts.'); render(); }
+    }, function(){ toast('Couldn\'t reach the roster — check your connection.'); render(); });
+    return;
+  }
+  if(action==='test-notify'){
+    el.disabled = true; el.textContent = 'Sending…';
+    server('sendTestEmail', [ui.adminPin]).then(function(res){
+      toast((res && res.message) || 'Couldn\'t send the test email.'); render();
+    }, function(){ toast('Couldn\'t reach the roster — check your connection.'); render(); });
     return;
   }
   if(action==='change-admin-pin'){
