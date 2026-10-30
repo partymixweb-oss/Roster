@@ -310,6 +310,24 @@
   .week-nav-label > div:first-child{font-family:var(--font-display); font-size:1rem;}
   .cell-empty{background:transparent; border:1.5px dashed var(--border); color:var(--accent); font-weight:800; min-width:36px; min-height:28px; display:inline-flex; align-items:center; justify-content:center; border-radius:10px;}
   .cell-empty:hover{border-color:var(--accent); color:var(--accent-strong); background:var(--accent-soft);}
+  /* Unpublished grid edits */
+  .cell-shift.ed-new, .cell-shift.ed-changed{outline:2px dashed var(--accent); outline-offset:1px;}
+  .cell-shift.ed-removed{border:1.5px dashed var(--status-open); color:var(--status-open); font-size:0.66rem; font-weight:700;}
+  .cell-shift.paint-target{outline:3px solid var(--accent); outline-offset:1px; background:var(--accent-soft) !important; color:var(--ink) !important;}
+  .cell-shift.brush-src{box-shadow:0 0 0 3px var(--accent) !important;}
+  table.grid.copy-mode .cell-shift{touch-action:none; user-select:none; -webkit-user-select:none;}
+  table.grid .cell-shift{user-select:none; -webkit-user-select:none;}
+  .grid-tools{display:flex; flex-wrap:wrap; gap:8px; margin:0 0 10px;}
+  .grid-tools .ghost-btn.on{background:var(--accent); color:var(--accent-ink); border-color:var(--accent);}
+  .copy-banner{background:var(--accent-soft); border:1px solid var(--accent); border-radius:12px; padding:9px 12px; margin:0 0 10px; font-size:0.84rem; display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+  .copy-banner b{font-weight:800;}
+  .time-chips{display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 4px;}
+  .time-chip{font:inherit; font-size:0.82rem; font-weight:700; border:1.5px solid var(--accent); background:var(--accent-soft); color:var(--ink); border-radius:999px; padding:7px 12px; cursor:pointer;}
+  .time-chip:active{transform:scale(0.96);}
+  .pub-bar{position:fixed; left:50%; transform:translateX(-50%); bottom:12px; z-index:55; width:calc(100% - 24px); max-width:740px; background:var(--surface); border:2px solid var(--accent); border-radius:16px; box-shadow:var(--shadow); padding:10px 12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+  .pub-bar .pub-count{font-weight:800; font-size:0.88rem; margin-right:auto;}
+  body.has-pubbar main{padding-bottom:110px;}
+  body.has-pubbar .toast-region{bottom:96px;}
 
   fieldset{border:none; padding:0; margin:0 0 14px;}
   .avail-row{display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 0; border-bottom:1px solid var(--border);}
@@ -492,6 +510,8 @@ function applyServer(res){
     if(JSON.stringify(ui.mgrDraft) === ui.mgrDraftOrig) dropMgrDraft();
     else rebaseMgrDraft();
   }
+  rebaseEdits();
+  if(ui.dragging) return;   // redraw once the drag ends
   render();
 }
 function logoutStaff(){
@@ -500,6 +520,7 @@ function logoutStaff(){
 }
 function lockAdmin(){
   ui.adminPin = null; ui.mgrUnlocked = false; dropMgrDraft();
+  ui.edits = {}; ui.editHistory = []; ui.brush = null; ui.copyMode = false;
   try{ sessionStorage.removeItem('roster_admin_pin_v1'); }catch(e){}
 }
 // Re-check a remembered admin PIN on load (the page itself never contains
@@ -741,8 +762,135 @@ function hideConfirm(){
 // it — a staff member can accept/decline/claim their own shifts on the live
 // week; an admin can additionally add, edit, or remove any shift on any
 // week (used to pre-plan future weeks or correct past/current ones).
+// ---------- quick grid editing ----------
+// Admin grid edits (add / edit / remove / copy / drag) are collected here per
+// week and published together with one "Save & publish". Each entry keeps the
+// roster as it was when editing started (base) so publishing merges cleanly
+// with anything staff changed in the meantime.
+ui.edits = {}; ui.editHistory = []; ui.brush = null; ui.copyMode = false;
+function cloneJ(x){ return JSON.parse(JSON.stringify(x)); }
+function gridShifts(weekKey){ return ui.edits[weekKey] ? ui.edits[weekKey].shifts : weekShiftsReadOnly(weekKey); }
+function editsFor(weekKey){
+  if(!ui.edits[weekKey]){ var cur = weekShiftsReadOnly(weekKey); ui.edits[weekKey] = {shifts: cloneJ(cur), base: cloneJ(cur)}; }
+  return ui.edits[weekKey];
+}
+function pushHistory(){ ui.editHistory.push(JSON.stringify(ui.edits)); if(ui.editHistory.length > 40) ui.editHistory.shift(); }
+var EDIT_FIELDS = ['staffId','originalStaffId','day','start','end','role','status'];
+function shiftDiffers(a, b){ return EDIT_FIELDS.some(function(f){ return (a[f]||null) !== (b[f]||null); }); }
+function weekChanges(e){
+  var b = {}, m = {}, n = 0;
+  e.base.forEach(function(s){ b[s.id] = s; }); e.shifts.forEach(function(s){ m[s.id] = s; });
+  e.shifts.forEach(function(s){ if(!b[s.id] || shiftDiffers(b[s.id], s)) n++; });
+  e.base.forEach(function(s){ if(!m[s.id]) n++; });
+  return n;
+}
+function changeCount(){ return Object.keys(ui.edits).reduce(function(n, k){ return n + weekChanges(ui.edits[k]); }, 0); }
+function pruneEdits(){ Object.keys(ui.edits).forEach(function(k){ if(!weekChanges(ui.edits[k])) delete ui.edits[k]; }); }
+function findCell(arr, staffId, dayKey){
+  return arr.find(function(s){ return s.staffId===staffId && s.day===dayKey; }) ||
+         arr.find(function(s){ return s.originalStaffId===staffId && s.day===dayKey && s.status==='open'; });
+}
+// 'new' | 'changed' | null for a cell that has a shift; 'removed' for an empty one
+function cellEditState(weekKey, staffId, dayKey, sh){
+  var e = ui.edits[weekKey]; if(!e) return null;
+  if(sh){
+    var b = e.base.find(function(x){ return x.id===sh.id; });
+    return !b ? 'new' : (shiftDiffers(b, sh) ? 'changed' : null);
+  }
+  var gone = findCell(e.base, staffId, dayKey);
+  return (gone && !e.shifts.some(function(x){ return x.id===gone.id; })) ? 'removed' : null;
+}
+function newShiftId(){ return 'sh_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+// Put a shift in one square (adds it, or changes the one already there).
+function putShift(weekKey, staffId, dayKey, start, end, role){
+  var e = editsFor(weekKey);
+  var ex = findCell(e.shifts, staffId, dayKey);
+  if(ex){
+    if(ex.start===start && ex.end===end && (ex.role||'')===(role||'') && ex.staffId===staffId) return false;
+    ex.staffId = staffId; ex.originalStaffId = staffId; ex.start = start; ex.end = end; ex.role = role; ex.status = 'pending';
+    delete ex.editRequest;
+  } else {
+    e.shifts.push({id:newShiftId(), staffId:staffId, originalStaffId:staffId, day:dayKey, start:start, end:end, role:role, status:'pending'});
+  }
+  return true;
+}
+function removeShiftAt(weekKey, staffId, dayKey){
+  var e = editsFor(weekKey);
+  var ex = findCell(e.shifts, staffId, dayKey); if(!ex) return false;
+  e.shifts = e.shifts.filter(function(s){ return s.id !== ex.id; });
+  return true;
+}
+// Role for a pasted shift: someone's usual role carries over as the target
+// person's usual role; a deliberately different role is kept.
+function pasteRole(brush, targetStaffId){
+  var from = staffById(brush.staffId), to = staffById(targetStaffId);
+  if(!brush.role || (from && brush.role === from.role)) return to ? to.role : brush.role;
+  return brush.role;
+}
+function brushFrom(weekKey, staffId, dayKey){
+  var sh = findCell(gridShifts(weekKey), staffId, dayKey); if(!sh) return null;
+  return {start:sh.start, end:sh.end, role:shiftRole(sh), staffId:staffId, day:dayKey, week:weekKey};
+}
+function pasteInto(targets){
+  if(!ui.brush || !targets.length) return 0;
+  pushHistory();
+  var n = 0;
+  targets.forEach(function(c){
+    if(c.week===ui.brush.week && c.staff===ui.brush.staffId && c.day===ui.brush.day) return;
+    if(putShift(c.week, c.staff, c.day, ui.brush.start, ui.brush.end, pasteRole(ui.brush, c.staff))) n++;
+  });
+  pruneEdits();
+  if(!n) ui.editHistory.pop();
+  return n;
+}
+// Most-used times this week and last week, for one-tap adding.
+function commonTimes(weekKey){
+  var count = {};
+  gridShifts(weekKey).concat(gridShifts(addDaysISO(weekKey, -7))).forEach(function(s){
+    var k = s.start + '-' + s.end; count[k] = (count[k] || 0) + 1;
+  });
+  ['09:00-13:00','13:00-17:30','09:00-17:30'].forEach(function(k){ if(!count[k]) count[k] = 0.5; });
+  return Object.keys(count).sort(function(a, b){ return count[b] - count[a] || (a < b ? -1 : 1); }).slice(0, 6)
+    .map(function(k){ var p = k.split('-'); return {start:p[0], end:p[1]}; });
+}
+function copyLastWeekPlan(weekKey){
+  var srcKey = addDaysISO(weekKey, -7);
+  var src = gridShifts(srcKey), cur = gridShifts(weekKey);
+  var add = [];
+  src.forEach(function(s){
+    var who = s.staffId || s.originalStaffId;
+    if(!who || !staffByIdRaw(who)) return;
+    if(findCell(cur, who, s.day) || add.some(function(a){ return a.staffId===who && a.day===s.day; })) return;
+    add.push({staffId:who, day:s.day, start:s.start, end:s.end, role:shiftRole(s)});
+  });
+  return {srcKey:srcKey, add:add};
+}
+function publishEdits(){
+  pruneEdits();
+  var n = changeCount();
+  if(!n){ toast('Nothing to publish.'); return; }
+  var weeks = cloneJ(ui.edits), hist = ui.editHistory.slice();
+  ui.edits = {}; ui.editHistory = [];
+  adminCommit(function(){
+    Object.keys(weeks).forEach(function(k){
+      setWeekShiftsArray(k, mergeShifts(weeks[k].base, weeks[k].shifts, getWeekShiftsArray(k)));
+    });
+  }, 'Published ' + n + ' change' + (n===1 ? '' : 's') + ' for everyone.', {
+    onFail: function(){ ui.edits = weeks; ui.editHistory = hist; render(); }
+  });
+}
+// Keep unpublished grid edits on top of the latest roster from the server.
+function rebaseEdits(){
+  Object.keys(ui.edits).forEach(function(k){
+    var e = ui.edits[k], latest = weekShiftsReadOnly(k);
+    e.shifts = cloneJ(mergeShifts(e.base, e.shifts, latest));
+    e.base = cloneJ(latest);
+  });
+  pruneEdits();
+}
+
 function findShiftInWeek(weekKey, dayKey, staffId){
-  var arr = weekShiftsReadOnly(weekKey);
+  var arr = gridShifts(weekKey);
   return arr.find(function(s){ return s.staffId===staffId && s.day===dayKey; }) ||
          arr.find(function(s){ return s.originalStaffId===staffId && s.day===dayKey && s.status==='open'; });
 }
@@ -783,7 +931,10 @@ function cellViewHTML(ctx, shift){
     else actions += '<p class="section-sub" style="margin:0;">Select your name above to claim this shift.</p>';
   }
   if(ui.mgrUnlocked){
+    var who = assignee || original;
     actions += '<button class="btn btn-secondary" data-action="cell-edit-start">Edit shift</button>' +
+      '<button class="btn btn-secondary" data-action="cell-copy">Copy to other squares</button>' +
+      (who ? '<button class="btn btn-secondary" data-action="cell-message">Message ' + esc(who.name) + '</button>' : '') +
       '<button class="btn btn-danger" data-action="cell-remove">Remove shift</button>';
   }
   return html + '<div class="detail-actions">' + actions + '<button class="btn btn-secondary" data-action="close-detail">Close</button></div>';
@@ -794,7 +945,11 @@ function cellEditFormHTML(ctx, shift){
   var roleVal = shift ? shiftRole(shift) : ((staff && staff.role) || ROLE_ORDER[0]);
   return '<div class="detail-row"><span class="k">For</span><span>' + esc(staff ? staff.name : '') + '</span></div>' +
     '<div class="detail-row"><span class="k">Day</span><span>' + day.label + ' ' + day.date + '</span></div>' +
-    '<label class="field-label" style="margin-top:10px;">Start</label>' +
+    '<label class="field-label" style="margin-top:10px;">' + (shift ? 'Quick times' : 'Quick add: tap a time') + '</label>' +
+    '<div class="time-chips">' + commonTimes(ctx.weekKey).map(function(c){
+      return '<button type="button" class="time-chip" data-action="' + (shift ? 'cell-chip-fill' : 'cell-chip-add') + '" data-start="' + c.start + '" data-end="' + c.end + '">' + fmtTime(c.start) + '–' + fmtTime(c.end) + '</button>';
+    }).join('') + '</div>' +
+    '<label class="field-label" style="margin-top:10px;">' + (shift ? 'Start' : 'Or set your own: start') + '</label>' +
     '<input type="time" id="cellStart" value="' + (shift ? shift.start : '09:00') + '">' +
     '<label class="field-label">End</label>' +
     '<input type="time" id="cellEnd" value="' + (shift ? shift.end : '17:00') + '">' +
@@ -803,10 +958,11 @@ function cellEditFormHTML(ctx, shift){
       ROLE_ORDER.map(function(r){ return '<option value="' + r + '"' + (roleVal===r ? ' selected' : '') + '>' + roleLabel(r) + '</option>'; }).join('') +
     '</select>' +
     '<div class="detail-actions">' +
-      '<button class="btn btn-primary" data-action="cell-save">' + (shift ? 'Save &amp; publish' : 'Add &amp; publish') + '</button>' +
+      '<button class="btn btn-primary" data-action="cell-save">' + (shift ? 'Save' : 'Add shift') + '</button>' +
       (shift ? '<button class="btn btn-danger" data-action="cell-remove">Remove shift</button>' : '') +
       '<button class="btn btn-secondary" data-action="close-detail">Cancel</button>' +
-    '</div>';
+    '</div>' +
+    '<p class="section-sub" style="margin:8px 0 0;">Changes are published together. Tap <b>Save &amp; publish</b> at the bottom when you\'re done.</p>';
 }
 
 // ---------- notify: one-tap WhatsApp / text / email prompts after a shift is saved ----------
@@ -945,7 +1101,7 @@ function adminCommit(mutate, successMsg, opts){
       if(res && res.error === 'bad_pin'){ lockAdmin(); revertUnsaved(); toast('Admin PIN not accepted — unlock Admin again.'); return; }
       if(res && res.conflict){
         if(++tries < 4){ attempt(JSON.stringify(res.state), res.version); return; }
-        applyServer(res); toast('The roster kept changing — please try that again.'); return;
+        applyServer(res); if(opts.onFail) opts.onFail(); toast('The roster kept changing — please try that again.'); return;
       }
       if(res && res.ok){
         applyServer(res);
@@ -954,10 +1110,12 @@ function adminCommit(mutate, successMsg, opts){
         return;
       }
       revertUnsaved();
+      if(opts.onFail) opts.onFail();
       toast((res && res.message) || 'That didn\'t save. Please try again.');
     }, function(err){
       setSaving(false);
       revertUnsaved();
+      if(opts.onFail) opts.onFail();
       toast(failMsg(err));
     });
   }
@@ -1019,7 +1177,9 @@ function render(){
         .map(function(a){ return '[' + a + '="' + CSS.escape(act.getAttribute(a)) + '"]'; }).join('');
     try{ sel = [act.selectionStart, act.selectionEnd]; }catch(e){}
   }
-  app.innerHTML = renderWeekNotesBanner() + renderIdentityBar() + renderTabs() + renderTabContent();
+  var pending = ui.mgrUnlocked ? changeCount() : 0;
+  app.innerHTML = renderWeekNotesBanner() + renderIdentityBar() + renderTabs() + renderTabContent() + (pending ? renderPubBar(pending) : '');
+  document.body.classList.toggle('has-pubbar', !!pending);
   if(keep){
     var again = null; try{ again = app.querySelector(keep); }catch(e){}
     if(again){
@@ -1031,6 +1191,14 @@ function render(){
   }
 }
 
+function renderPubBar(n){
+  return '<div class="pub-bar" role="region" aria-label="Unpublished changes">' +
+    '<span class="pub-count">' + n + ' unpublished change' + (n===1 ? '' : 's') + '</span>' +
+    (ui.editHistory.length ? '<button class="ghost-btn" data-action="edits-undo">↶ Undo</button>' : '') +
+    '<button class="btn btn-secondary" data-action="edits-discard">Discard</button>' +
+    '<button class="btn btn-primary" data-action="edits-publish">Save &amp; publish</button>' +
+  '</div>';
+}
 function renderWeekNotesBanner(){
   var notes = (STATE.weekNotes || '').trim();
   if(!notes) return '';
@@ -1341,23 +1509,47 @@ function renderFullWeek(){
     '<span><span class="dot" style="background:var(--status-open);"></span>Open — needs coverage</span>' +
   '</div>';
 
+  if(isAdmin){
+    var hasPrev = gridShifts(addDaysISO(viewed.key, -7)).length > 0;
+    out += '<div class="grid-tools">' +
+      (hasPrev ? '<button class="ghost-btn" data-action="copy-last-week">⧉ Copy last week</button>' : '') +
+      '<button class="ghost-btn' + (ui.copyMode ? ' on' : '') + '" data-action="toggle-copy-mode">' + (ui.copyMode ? '✓ Copy &amp; paste on' : '✎ Copy &amp; paste') + '</button>' +
+      (ui.editHistory.length ? '<button class="ghost-btn" data-action="edits-undo">↶ Undo</button>' : '') +
+    '</div>';
+    if(ui.copyMode){
+      out += '<div class="copy-banner">' + (ui.brush
+        ? '<span>Copying <b>' + fmtTime(ui.brush.start) + '–' + fmtTime(ui.brush.end) + '</b>. Tap squares, or drag across them, to paste.</span>'
+        : '<span><b>Tap a shift</b> to copy it.</span>') +
+        (ui.brush ? '<button class="ghost-btn" data-action="clear-brush">Pick another</button>' : '') +
+        '<button class="ghost-btn" data-action="toggle-copy-mode" style="margin-left:auto;">Done</button></div>';
+    } else {
+      out += '<p class="section-sub" style="margin-top:-4px;">Tip: on a computer you can drag a shift onto other squares to copy it. Changes are collected, then published together.</p>';
+    }
+  }
+
+  var gShifts = gridShifts(viewed.key);
   var rows = '';
   STATE.staff.forEach(function(s){
     rows += '<tr><td>' + esc(s.name) + '</td>';
     viewed.days.forEach(function(d){
-      var sh = viewed.shifts.find(function(x){ return x.staffId===s.id && x.day===d.key; }) ||
-               viewed.shifts.find(function(x){ return x.originalStaffId===s.id && x.day===d.key && x.status==='open'; });
+      var sh = findCell(gShifts, s.id, d.key);
+      var edState = isAdmin ? cellEditState(viewed.key, s.id, d.key, sh) : null;
+      var edCls = edState ? ' ed-' + edState : '';
+      var isBrush = ui.copyMode && ui.brush && ui.brush.week===viewed.key && ui.brush.staffId===s.id && ui.brush.day===d.key;
+      if(isBrush) edCls += ' brush-src';
       if(sh){
         var cellConflict = viewed.isActive ? availabilityConflict(sh) : null;
         var csty = cellStatusStyle(sh.status);
         var cellBorder = cellConflict ? 'box-shadow:inset 0 0 0 2px var(--status-open);' : '';
         var titleText = statusInfo(sh).label + (cellConflict ? ' — ' + cellConflict.reason : '');
-        rows += '<td><span class="cell-shift clickable" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" style="background:' + csty.bg + '; color:' + csty.fg + ';' + cellBorder + '" title="' + esc(titleText) + '">' +
+        rows += '<td><span class="cell-shift clickable' + edCls + '" data-filled="1" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" style="background:' + csty.bg + '; color:' + csty.fg + ';' + cellBorder + '" title="' + esc(titleText + (edState ? ' (not published yet)' : '')) + '">' +
           '<span class="cell-time mono">' + (cellConflict ? '⚠ ' : '') + fmtTime(sh.start) + '–' + fmtTime(sh.end) + '</span>' +
           '<span class="cell-role">' + esc(roleLabel(shiftRole(sh))) + '</span>' +
         '</span></td>';
       } else if(isAdmin){
-        rows += '<td><span class="cell-shift clickable cell-empty" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="Add a shift for ' + esc(s.name) + '">+</span></td>';
+        rows += edState === 'removed'
+          ? '<td><span class="cell-shift clickable ed-removed" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="Removed (not published yet)">removed</span></td>'
+          : '<td><span class="cell-shift clickable cell-empty" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="Add a shift for ' + esc(s.name) + '">+</span></td>';
       } else {
         rows += '<td><span class="cell-dash">–</span></td>';
       }
@@ -1365,7 +1557,7 @@ function renderFullWeek(){
     rows += '</tr>';
   });
   var head = '<tr><th>Staff</th>' + viewed.days.map(function(d){ return '<th>' + d.label + '<br>' + d.date + '</th>'; }).join('') + '</tr>';
-  out += '<div class="scrollx"><table class="grid">' + head + rows + '</table></div>';
+  out += '<div class="scrollx"><table class="grid' + (isAdmin && ui.copyMode ? ' copy-mode' : '') + '">' + head + rows + '</table></div>';
   return out;
 }
 
@@ -1687,7 +1879,7 @@ function renderBudget(){
   // Cost the same week the Week tab is showing (the live week uses the
   // admin draft so unsaved edits count; other weeks use their saved shifts).
   var viewed = resolveViewedWeek();
-  var budgetShifts = viewed.isActive ? ui.mgrDraft.shifts : viewed.shifts;
+  var budgetShifts = ui.edits[viewed.key] ? ui.edits[viewed.key].shifts : (viewed.isActive ? ui.mgrDraft.shifts : viewed.shifts);
   var rows = [];
   var grandTotal = 0, totalHours = 0, unfilledHours = 0;
   var roleTotals = {manager:0, supervisor:0, retail:0, online_orders:0};
@@ -1842,6 +2034,7 @@ function onClick(e){
   if(action==='confirm-yes'){ var fn = pendingConfirmAction; hideConfirm(); if(fn) fn(); return; }
   if(action==='confirm-no'){ hideConfirm(); return; }
   if(action==='close-detail'){ hideDetail(); return; }
+  if(action==='grid-cell' && (ui.copyMode || ui.suppressClick) && ui.mgrUnlocked){ ui.suppressClick = false; return; }
   if(action==='grid-cell'){ openCellModal(el.getAttribute('data-week'), el.getAttribute('data-day'), el.getAttribute('data-staff')); return; }
   if(action==='tab'){ persistTab(el.getAttribute('data-tab')); render(); return; }
   if(action==='week-prev'){ persistWeekView(addDaysISO(ui.weekView || weekStartKey(), -7)); render(); return; }
@@ -1940,45 +2133,75 @@ function onClick(e){
     document.getElementById('detailBox').innerHTML = cellEditFormHTML(ctxEdit, shiftEdit);
     return;
   }
-  if(action==='cell-save'){
+  if(action==='cell-save' || action==='cell-chip-add'){
     var ctxSave = ui.cellCtx; if(!ctxSave) return;
-    var startVal2 = document.getElementById('cellStart').value;
-    var endVal2 = document.getElementById('cellEnd').value;
+    var startVal2 = action==='cell-chip-add' ? el.getAttribute('data-start') : document.getElementById('cellStart').value;
+    var endVal2 = action==='cell-chip-add' ? el.getAttribute('data-end') : document.getElementById('cellEnd').value;
     var roleVal2 = document.getElementById('cellRole').value;
     if(!startVal2 || !endVal2){ toast('Set a start and end time.'); return; }
     if(endVal2 <= startVal2){ toast('End time needs to be after the start time.'); return; }
-    var newShiftId = 'sh_' + Date.now().toString(36) + Math.floor(Math.random()*1000);
-    var savedShift;
-    // Unsaved Budget/Manage edits are kept; they're brought up to date
-    // with this shift when the save comes back.
-    adminCommit(function(){
-      var arr = getWeekShiftsArray(ctxSave.weekKey);
-      var existing = arr.find(function(s){ return s.staffId===ctxSave.staffId && s.day===ctxSave.dayKey; }) ||
-                     arr.find(function(s){ return s.originalStaffId===ctxSave.staffId && s.day===ctxSave.dayKey && s.status==='open'; });
-      if(existing){
-        existing.staffId = ctxSave.staffId; existing.originalStaffId = ctxSave.staffId;
-        existing.start = startVal2; existing.end = endVal2; existing.role = roleVal2; existing.status = 'pending';
-        delete existing.editRequest;
-        savedShift = existing;
-      } else {
-        savedShift = {id:newShiftId, staffId:ctxSave.staffId, originalStaffId:ctxSave.staffId, day:ctxSave.dayKey, start:startVal2, end:endVal2, role:roleVal2, status:'pending'};
-        arr.push(savedShift);
-      }
-    }, 'Shift saved.');
-    var notifyStaff = staffById(ctxSave.staffId);
-    if(notifyStaff) document.getElementById('detailBox').innerHTML = notifyPanelHTML(ctxSave, notifyStaff, savedShift);
+    pushHistory();
+    if(!putShift(ctxSave.weekKey, ctxSave.staffId, ctxSave.dayKey, startVal2, endVal2, roleVal2)) ui.editHistory.pop();
+    pruneEdits();
+    hideDetail(); render();
+    return;
+  }
+  if(action==='cell-chip-fill'){
+    document.getElementById('cellStart').value = el.getAttribute('data-start');
+    document.getElementById('cellEnd').value = el.getAttribute('data-end');
     return;
   }
   if(action==='cell-remove'){
     var ctxRemove = ui.cellCtx; if(!ctxRemove) return;
-    var existingR = getWeekShiftsArray(ctxRemove.weekKey).find(function(s){ return s.staffId===ctxRemove.staffId && s.day===ctxRemove.dayKey; });
-    if(!existingR){ hideDetail(); return; }
-    var removeId = existingR.id;
-    hideDetail();
-    adminCommit(function(){
-      var arrR = getWeekShiftsArray(ctxRemove.weekKey);
-      setWeekShiftsArray(ctxRemove.weekKey, arrR.filter(function(s){ return s.id !== removeId; }));
-    }, 'Shift removed.');
+    pushHistory();
+    if(!removeShiftAt(ctxRemove.weekKey, ctxRemove.staffId, ctxRemove.dayKey)) ui.editHistory.pop();
+    pruneEdits();
+    hideDetail(); render();
+    return;
+  }
+  if(action==='cell-copy'){
+    var ctxCopy = ui.cellCtx; if(!ctxCopy) return;
+    ui.brush = brushFrom(ctxCopy.weekKey, ctxCopy.staffId, ctxCopy.dayKey);
+    ui.copyMode = !!ui.brush;
+    hideDetail(); render();
+    return;
+  }
+  if(action==='cell-message'){
+    var ctxMsg = ui.cellCtx; if(!ctxMsg) return;
+    var msgShift = findShiftInWeek(ctxMsg.weekKey, ctxMsg.dayKey, ctxMsg.staffId);
+    var msgStaff = msgShift && staffById(msgShift.staffId || msgShift.originalStaffId);
+    if(msgStaff) document.getElementById('detailBox').innerHTML = notifyPanelHTML(ctxMsg, msgStaff, msgShift);
+    return;
+  }
+  if(action==='toggle-copy-mode'){ ui.copyMode = !ui.copyMode; ui.brush = null; render(); return; }
+  if(action==='clear-brush'){ ui.brush = null; render(); return; }
+  if(action==='edits-undo'){
+    if(!ui.editHistory.length) return;
+    ui.edits = JSON.parse(ui.editHistory.pop());
+    rebaseEdits(); render();
+    return;
+  }
+  if(action==='edits-discard'){
+    var nDiscard = changeCount();
+    showConfirm('Discard ' + nDiscard + ' unpublished change' + (nDiscard===1 ? '' : 's') + '?', function(){
+      ui.edits = {}; ui.editHistory = []; render();
+    });
+    return;
+  }
+  if(action==='edits-publish'){ publishEdits(); return; }
+  if(action==='copy-last-week'){
+    var viewedC = resolveViewedWeek();
+    var plan = copyLastWeekPlan(viewedC.key);
+    if(!plan.add.length){ toast('Every shift from last week is already here.'); return; }
+    var skipped = gridShifts(plan.srcKey).length - plan.add.length;
+    showConfirm('Copy ' + plan.add.length + ' shift' + (plan.add.length===1 ? '' : 's') + ' from ' + weekLabelFor(plan.srcKey) + ' into this week?' +
+      (skipped > 0 ? ' ' + skipped + ' square' + (skipped===1 ? ' that already has' : 's that already have') + ' a shift stay as they are.' : '') +
+      ' You can check them before publishing.', function(){
+      pushHistory();
+      plan.add.forEach(function(a){ putShift(viewedC.key, a.staffId, a.day, a.start, a.end, a.role); });
+      pruneEdits(); render();
+      toast('Copied ' + plan.add.length + ' shifts. Check them, then tap Save & publish.');
+    });
     return;
   }
 
@@ -2358,6 +2581,69 @@ function onChange(e){
     return;
   }
 }
+
+// ---------- tap / drag to paste shifts on the Week grid (admin) ----------
+// Copy & paste mode: tap a shift to pick it up, then tap or drag across
+// squares to paste. With a mouse, dragging a shift onto other squares works
+// without turning the mode on. Painted squares are marked during the drag
+// and applied in one step (one Undo) when it ends.
+function cellRef(el){ return {week: el.getAttribute('data-week'), staff: el.getAttribute('data-staff'), day: el.getAttribute('data-day')}; }
+function cellKey(c){ return c.week + '|' + c.staff + '|' + c.day; }
+function markPaint(el){
+  el.classList.add('paint-target');
+  if(ui.brush) el.innerHTML = '<span class="cell-time mono">' + fmtTime(ui.brush.start) + '–' + fmtTime(ui.brush.end) + '</span>';
+}
+document.addEventListener('pointerdown', function(e){
+  if(!ui.mgrUnlocked || e.button > 0) return;
+  var el = e.target.closest && e.target.closest('.cell-shift[data-action="grid-cell"]');
+  if(!el) return;
+  var c = cellRef(el);
+  if(ui.copyMode){
+    e.preventDefault();
+    if(!ui.brush){ ui.drag = {pick: c}; return; }
+    ui.dragging = true;
+    ui.drag = {targets: {}, list: []};
+    ui.drag.targets[cellKey(c)] = true; ui.drag.list.push(c); markPaint(el);
+    return;
+  }
+  if(e.pointerType === 'mouse' && el.getAttribute('data-filled')){
+    ui.drag = {origin: c, from: brushFrom(c.week, c.staff, c.day), targets: {}, list: [], mouse: true};
+  }
+});
+document.addEventListener('pointermove', function(e){
+  var d = ui.drag; if(!d || d.pick) return;
+  var hit = document.elementFromPoint(e.clientX, e.clientY);
+  var el = hit && hit.closest && hit.closest('.cell-shift[data-action="grid-cell"]');
+  if(!el) return;
+  var c = cellRef(el), k = cellKey(c);
+  if(d.mouse && !ui.dragging){
+    if(k === cellKey(d.origin)) return;
+    ui.dragging = true; ui.brush = d.from;
+    var src = document.querySelector('.cell-shift[data-week="' + d.origin.week + '"][data-staff="' + d.origin.staff + '"][data-day="' + d.origin.day + '"]');
+    if(src) src.classList.add('brush-src');
+  }
+  if(!ui.dragging || d.targets[k]) return;
+  d.targets[k] = true; d.list.push(c); markPaint(el);
+});
+function endDrag(cancelled){
+  var d = ui.drag; ui.drag = null;
+  if(!d) return;
+  if(d.pick){
+    if(!cancelled){ ui.brush = brushFrom(d.pick.week, d.pick.staff, d.pick.day); if(!ui.brush) toast('Tap a square that has a shift to copy it.'); }
+    render(); return;
+  }
+  var wasDragging = ui.dragging; ui.dragging = false;
+  if(!wasDragging) return;
+  var n = cancelled ? 0 : pasteInto(d.list);
+  if(d.mouse){ ui.brush = null; ui.suppressClick = true; setTimeout(function(){ ui.suppressClick = false; }, 0); }
+  render();
+  if(n) toast('Pasted into ' + n + ' square' + (n===1 ? '' : 's') + '.');
+}
+document.addEventListener('pointerup', function(){ endDrag(false); });
+document.addEventListener('pointercancel', function(){ endDrag(true); });
+window.addEventListener('beforeunload', function(e){
+  if(ui.mgrUnlocked && changeCount()){ e.preventDefault(); e.returnValue = ''; }
+});
 
 document.addEventListener('click', onClick);
 document.addEventListener('change', onChange);
