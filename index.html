@@ -239,6 +239,26 @@
     content:''; position:absolute; left:50%; bottom:3px; transform:translateX(-50%);
     width:16px; height:3px; border-radius:999px; background:var(--accent);
   }
+  .dash-note{white-space:pre-wrap; font-size:0.92rem; line-height:1.5; margin:0;}
+  .dash-meta{font-size:0.74rem; color:var(--muted); margin-top:6px;}
+  .tick-row{display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px solid var(--border);}
+  .tick-row:last-child{border-bottom:none;}
+  .tick{flex:0 0 auto; width:26px; height:26px; border-radius:8px; border:2px solid var(--accent); background:transparent; color:#fff; font-weight:900; font-size:0.9rem; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; padding:0;}
+  .tick.on{background:var(--status-confirmed); border-color:var(--status-confirmed);}
+  .tick-text{flex:1 1 auto; font-size:0.9rem; line-height:1.4; padding-top:3px;}
+  .tick-row.done .tick-text{text-decoration:line-through; color:var(--muted);}
+  .tick-by{display:block; font-size:0.72rem; color:var(--muted); text-decoration:none;}
+  .due{display:inline-block; font-size:0.7rem; font-weight:700; padding:1px 7px; border-radius:999px; background:var(--surface-2); color:var(--ink-soft); margin-left:6px;}
+  .due.late{background:var(--status-open-soft); color:var(--status-open);}
+  .ho{padding:9px 0; border-bottom:1px solid var(--border);}
+  .ho:last-child{border-bottom:none;}
+  .ho-head{font-size:0.75rem; color:var(--muted); display:flex; gap:8px; align-items:center;}
+  .ho-text{white-space:pre-wrap; font-size:0.9rem; margin-top:3px;}
+  .progress{height:6px; border-radius:99px; background:var(--surface-2); overflow:hidden; margin:6px 0 4px;}
+  .progress > span{display:block; height:100%; background:var(--status-confirmed);}
+  .chip-row{display:flex; flex-wrap:wrap; gap:6px; margin:6px 0;}
+  .chip-row label{display:inline-flex; align-items:center; gap:5px; font-size:0.82rem; padding:5px 10px; border:1px solid var(--border); border-radius:999px; cursor:pointer;}
+  .chip-row input{width:auto; margin:0;}
   .tab-badge{
     display:inline-flex; align-items:center; justify-content:center; min-width:16px; height:16px;
     padding:0 4px; margin-left:4px; border-radius:999px; background:var(--accent); color:var(--accent-ink);
@@ -446,6 +466,11 @@ function normalizeState(st){
   st.weeks = st.weeks || {};
   st.roleInfo = st.roleInfo || {};
   st.staff.forEach(normalizeRates);
+  // Dashboard data only arrives for the admin (staff get their own part via ui.myDash).
+  if(st.dash){
+    st.dash.notes = st.dash.notes || {}; st.dash.tasks = st.dash.tasks || []; st.dash.checklists = st.dash.checklists || [];
+    st.dash.checks = st.dash.checks || {}; st.dash.handovers = st.dash.handovers || [];
+  }
   return st;
 }
 // Rates are split by day-type since pay differs on weekdays vs Saturday vs
@@ -471,11 +496,12 @@ function dayType(dayKey){ return dayKey==='sat' ? 'sat' : dayKey==='sun' ? 'sun'
 var DAY_TYPE_LABEL = {weekday:'Weekday', sat:'Saturday', sun:'Sunday'};
 // The public link to this roster, used to build notify messages.
 var ROSTER_LINK = BOOT.url || (location.origin + location.pathname);
-var ui = { tab: 'my', me: null, myPin: null, adminPin: null, mgrUnlocked: false, mgrDraft: null, mgrDraftBase: null, weekView: null, cellCtx: null };
+var ui = { tab: 'dash', me: null, myPin: null, adminPin: null, mgrUnlocked: false, mgrDraft: null, mgrDraftBase: null, weekView: null, cellCtx: null };
 
 try { ui.me = localStorage.getItem('roster_me_v1') || null; ui.myPin = localStorage.getItem('roster_pin_v1') || null; } catch(e){}
 if(!ui.me || !ui.myPin || !staffByIdRaw(ui.me)){ ui.me = null; ui.myPin = null; }
-try { ui.tab = sessionStorage.getItem('roster_tab_v1') || 'my'; } catch(e){}
+try { ui.tab = sessionStorage.getItem('roster_tab_v1') || 'dash'; } catch(e){}
+ui.myDash = null; ui.dashStaff = null; ui.dashEditList = null; ui.drafts = {};
 try { ui.adminPin = sessionStorage.getItem('roster_admin_pin_v1') || null; } catch(e){}
 try { ui.weekView = sessionStorage.getItem('roster_weekview_v1') || null; } catch(e){}
 function staffByIdRaw(id){ return STATE.staff.find(function(s){ return s.id===id; }) || null; }
@@ -502,6 +528,7 @@ function failMsg(err){
 // Take a roster the server sent back as the new truth.
 function applyServer(res){
   if(!res || !res.state) return;
+  if(res.dash !== undefined) ui.myDash = res.dash;
   STATE = normalizeState(res.state);
   VERSION = res.version;
   SAVED_STATE_JSON = JSON.stringify(STATE);
@@ -520,6 +547,7 @@ function applyServer(res){
 function logoutStaff(){
   ui.me = null; ui.myPin = null; ui._availDraft = null;
   try{ localStorage.removeItem('roster_me_v1'); localStorage.removeItem('roster_pin_v1'); }catch(e){}
+  ui.myDash = null; ui.drafts = {};
 }
 function lockAdmin(){
   ui.adminPin = null; ui.mgrUnlocked = false; dropMgrDraft();
@@ -547,7 +575,7 @@ function pollTick(){
   if(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;
   if(document.querySelector('.confirm-overlay.show')) return;
   pollBusy = true;
-  server('getStateIfChanged', [VERSION, ui.adminPin || '']).then(function(res){
+  server('getStateIfChanged', [VERSION, ui.adminPin || '', ui.me || '', ui.myPin || '']).then(function(res){
     pollBusy = false;
     if(res && res.state && res.version !== VERSION) applyServer(res);
   }, function(){ pollBusy = false; });
@@ -765,6 +793,241 @@ function hideConfirm(){
 // it — a staff member can accept/decline/claim their own shifts on the live
 // week; an admin can additionally add, edit, or remove any shift on any
 // week (used to pre-plan future weeks or correct past/current ones).
+// ---------- dashboard ----------
+// Staff see: a note from the manager, tasks to tick off, today's store
+// checklists (when they're rostered on), handover notes and their own notes.
+// The admin writes notes/tasks/checklists and can read everyone's own notes.
+function emptyDash(){ return {notes:{}, tasks:[], checklists:[], checks:{}, handovers:[]}; }
+function ensureDash(){ STATE.dash = STATE.dash || emptyDash(); return STATE.dash; }
+function myDashView(){
+  if(!ui.me) return null;
+  if(ui.mgrUnlocked && STATE.dash){
+    var d = STATE.dash;
+    return {note: d.notes[ui.me] || {}, tasks: d.tasks.filter(function(x){ return x.staffId===ui.me; }), checklists: d.checklists, checks: d.checks, handovers: d.handovers};
+  }
+  return ui.myDash;
+}
+function dashId(prefix){ return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+function draftVal(key, saved){ return ui.drafts[key] !== undefined ? ui.drafts[key] : (saved || ''); }
+function fmtStamp(isoTs){
+  if(!isoTs) return '';
+  var d = new Date(isoTs); if(isNaN(d)) return '';
+  var t = fmtTime(pad2(d.getHours()) + ':' + pad2(d.getMinutes()));
+  var day = isoOf(d), today = todayISO();
+  if(day === today) return 'Today ' + t;
+  if(day === addDaysISO(today, -1)) return 'Yesterday ' + t;
+  return fmtDateDisplay(day) + ' ' + t;
+}
+function shiftOnDate(staffId, iso){
+  var keys = [weekStartKey()].concat(Object.keys(STATE.weeks || {}));
+  for(var i = 0; i < keys.length; i++){
+    var d = weekDaysFor(keys[i]).find(function(x){ return x.iso===iso; });
+    if(!d) continue;
+    var sh = weekShiftsReadOnly(keys[i]).find(function(s){ return s.staffId===staffId && s.day===d.key; });
+    if(sh) return sh;
+  }
+  return null;
+}
+function listsForDay(lists, iso, role){
+  var dayKey = WEEKDAY_ABBR[new Date(iso + 'T00:00:00').getDay()];
+  return (lists || []).filter(function(l){
+    return (!l.days || !l.days.length || l.days.indexOf(dayKey) >= 0) && (!role || !l.roles || !l.roles.length || l.roles.indexOf(role) >= 0);
+  });
+}
+function dueBadge(due, done){
+  if(!due) return '';
+  var late = !done && due < todayISO();
+  var label = due === todayISO() ? 'Due today' : 'Due ' + fmtDateDisplay(due);
+  return '<span class="due' + (late ? ' late' : '') + '">' + (late ? 'Overdue · ' : '') + esc(label.replace(/^Due /, late ? '' : 'Due ')) + '</span>';
+}
+function checklistCardHTML(list, checks, iso, canTick){
+  var ticks = (checks[iso] || {})[list.id] || {};
+  var items = list.items || [];
+  var done = items.filter(function(it){ return ticks[it.id]; }).length;
+  var out = '<div class="card"><div style="display:flex; justify-content:space-between; gap:10px; align-items:baseline;"><strong>' + esc(list.name) + '</strong>' +
+    '<span class="mono" style="font-size:0.8rem; color:var(--muted);">' + done + '/' + items.length + '</span></div>' +
+    '<div class="progress"><span style="width:' + (items.length ? Math.round(done*100/items.length) : 0) + '%"></span></div>';
+  items.forEach(function(it){
+    var tk = ticks[it.id], by = tk ? staffById(tk.by) : null;
+    out += '<div class="tick-row' + (tk ? ' done' : '') + '">' +
+      (canTick ? '<button class="tick' + (tk ? ' on' : '') + '" data-action="dash-check" data-list="' + list.id + '" data-item="' + it.id + '" data-done="' + (tk ? '0' : '1') + '" aria-label="' + (tk ? 'Untick' : 'Tick') + ' ' + esc(it.text) + '">' + (tk ? '✓' : '') + '</button>'
+               : '<span class="tick' + (tk ? ' on' : '') + '" style="cursor:default;">' + (tk ? '✓' : '') + '</span>') +
+      '<span class="tick-text">' + esc(it.text) + (tk ? '<span class="tick-by">✓ ' + esc(by ? by.name : '') + ' · ' + esc(fmtStamp(tk.at)) + '</span>' : '') + '</span></div>';
+  });
+  return out + '</div>';
+}
+function handoversHTML(list, canDeleteAny){
+  var items = (list || []).slice().sort(function(a, b){ return a.at < b.at ? 1 : -1; });
+  if(!items.length) return '<p class="section-sub" style="margin:0;">No handover notes yet.</p>';
+  return items.map(function(h){
+    var who = staffById(h.staffId);
+    var mine = ui.me && h.staffId === ui.me;
+    return '<div class="ho"><div class="ho-head"><strong style="color:var(--ink);">' + esc(who ? who.name : 'Someone') + '</strong><span>' + esc(fmtStamp(h.at)) + '</span>' +
+      (mine || canDeleteAny ? '<button class="icon-btn" style="margin-left:auto;" data-action="' + (canDeleteAny ? 'dash-ho-admin-remove' : 'dash-ho-remove') + '" data-id="' + h.id + '">Delete</button>' : '') +
+      '</div><div class="ho-text">' + esc(h.text) + '</div></div>';
+  }).join('');
+}
+
+function renderDashboard(){
+  if(!ui.me && !ui.mgrUnlocked){
+    return '<div class="empty">Select your name above and enter your PIN to see your dashboard: notes from your manager, your tasks, today\'s checklists and handover notes.</div>';
+  }
+  var out = '';
+  if(ui.me){
+    var me = staffById(ui.me), d = myDashView();
+    out += '<h2 class="section-title">Hi ' + esc(me ? me.name : '') + '</h2>' +
+      '<p class="section-sub">' + esc(fmtDateDisplay(todayISO())) + '</p>';
+    if(!d){
+      out += '<div class="empty">Loading your dashboard…</div>';
+    } else {
+      var note = d.note || {};
+      // Shifts still waiting on them live in My Shifts; point there.
+      var toAccept = STATE.shifts.filter(function(s){ return s.staffId===ui.me && s.status==='pending'; }).length;
+      if(toAccept) out += '<div class="card" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; border-color:var(--status-pending);"><span style="flex:1 1 auto; font-size:0.9rem;"><b>' + toAccept + ' shift' + (toAccept===1 ? '' : 's') + '</b> waiting for you to accept.</span><button class="btn btn-primary" data-action="tab" data-tab="my">Go to My Shifts</button></div>';
+      // 1. from the manager
+      out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">📌 From your manager</h2>' +
+        (note.admin ? '<p class="dash-note">' + esc(note.admin) + '</p>' + (note.adminUpdated ? '<div class="dash-meta">Updated ' + esc(fmtStamp(note.adminUpdated)) + '</div>' : '')
+                    : '<p class="section-sub" style="margin:0;">Nothing from your manager right now.</p>') + '</div>';
+      // 2. tasks
+      var open = d.tasks.filter(function(x){ return !x.done; }).sort(function(a, b){ return (a.due || '9999') < (b.due || '9999') ? -1 : 1; });
+      var doneT = d.tasks.filter(function(x){ return x.done; }).sort(function(a, b){ return a.doneAt < b.doneAt ? 1 : -1; }).slice(0, 5);
+      out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">✅ Your tasks' + (open.length ? ' <span class="tab-badge">' + open.length + '</span>' : '') + '</h2>';
+      if(!open.length && !doneT.length) out += '<p class="section-sub" style="margin:0;">No tasks for you right now.</p>';
+      if(!open.length && doneT.length) out += '<p class="section-sub" style="margin:0 0 6px;">All done. Nice work! 🎉</p>';
+      open.concat(doneT).forEach(function(x){
+        out += '<div class="tick-row' + (x.done ? ' done' : '') + '"><button class="tick' + (x.done ? ' on' : '') + '" data-action="dash-task" data-task="' + x.id + '" data-done="' + (x.done ? '0' : '1') + '" aria-label="' + (x.done ? 'Mark not done' : 'Mark done') + '">' + (x.done ? '✓' : '') + '</button>' +
+          '<span class="tick-text">' + esc(x.text) + dueBadge(x.due, x.done) + '</span></div>';
+      });
+      out += '</div>';
+      // 3. today's checklists
+      var today = todayISO(), myShift = shiftOnDate(ui.me, today);
+      var lists = listsForDay(d.checklists, today, me && me.role);
+      out += '<h2 class="section-title" style="margin-top:18px; font-size:0.95rem;">📋 Today\'s checklists</h2>';
+      if(!myShift){
+        out += '<div class="empty">You\'re not rostered on today, so there are no checklists for you.</div>';
+      } else if(!lists.length){
+        out += '<div class="empty">No checklists for today. You\'re on ' + fmtTime(myShift.start) + '–' + fmtTime(myShift.end) + '.</div>';
+      } else {
+        out += '<p class="section-sub">You\'re on ' + fmtTime(myShift.start) + '–' + fmtTime(myShift.end) + '. Tick things off as you go. Everyone working today shares these lists.</p>';
+        lists.forEach(function(l){ out += checklistCardHTML(l, d.checks || {}, today, true); });
+      }
+      // 4. handovers
+      out += '<div class="card" style="margin-top:14px;"><h2 class="section-title" style="font-size:0.9rem;">🔁 Handover notes</h2>' +
+        '<p class="section-sub">Leave a note for whoever is on next, like an order to collect or something running low.</p>' +
+        '<textarea rows="2" id="hoText" data-draft="ho" placeholder="e.g. Smith balloon order collected at 3pm">' + esc(draftVal('ho', '')) + '</textarea>' +
+        '<div style="margin:8px 0 10px;"><button class="btn btn-primary" data-action="dash-ho-add">Post note</button></div>' +
+        handoversHTML(d.handovers, false) + '</div>';
+      // 5. my notes
+      out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">📝 My notes</h2>' +
+        '<p class="section-sub">Your own notes and reminders. Your manager can see these too.</p>' +
+        '<textarea rows="5" id="myNotes" data-draft="mine">' + esc(draftVal('mine', note.mine)) + '</textarea>' +
+        '<div style="margin-top:8px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;"><button class="btn btn-primary" data-action="dash-mine-save">Save my notes</button>' +
+        (ui.drafts.mine !== undefined && ui.drafts.mine !== (note.mine || '') ? '<span style="font-size:0.78rem; font-weight:700; color:var(--status-pending);">Not saved yet</span>' : (note.mineUpdated ? '<span class="dash-meta" style="margin:0;">Saved ' + esc(fmtStamp(note.mineUpdated)) + '</span>' : '')) +
+        '</div></div>';
+    }
+  }
+  if(ui.mgrUnlocked) out += renderDashAdmin();
+  return out;
+}
+
+var DAY_KEYS = ['mon','tue','wed','thu','fri','sat','sun'];
+function renderDashAdmin(){
+  var D = STATE.dash || emptyDash();
+  var staffList = STATE.staff;
+  if(!ui.dashStaff || !staffByIdRaw(ui.dashStaff)) ui.dashStaff = staffList.length ? staffList[0].id : null;
+  var who = staffByIdRaw(ui.dashStaff);
+  var out = '<h2 class="section-title" style="margin-top:' + (ui.me ? '26px' : '0') + ';">Manage the dashboard</h2>' +
+    '<p class="section-sub">Only you see this part. Write notes and tasks for each person, set up store checklists, and read handover notes.</p>';
+
+  // per person
+  out += '<div class="card"><label class="field-label" style="margin-top:0;">Team member</label>' +
+    '<select class="inline-select" data-action="dash-pick-staff">' + staffList.map(function(s){
+      var openN = D.tasks.filter(function(x){ return x.staffId===s.id && !x.done; }).length;
+      return '<option value="' + s.id + '"' + (s.id===ui.dashStaff ? ' selected' : '') + '>' + esc(s.name) + (openN ? ' (' + openN + ' open task' + (openN===1 ? '' : 's') + ')' : '') + '</option>';
+    }).join('') + '</select>';
+  if(who){
+    var n = D.notes[who.id] || {};
+    var nk = 'admin_' + who.id;
+    out += '<label class="field-label">Note for ' + esc(who.name) + '</label>' +
+      '<textarea rows="4" id="dashAdminNote" data-draft="' + nk + '" placeholder="Shown at the top of ' + esc(who.name) + '\'s dashboard">' + esc(draftVal(nk, n.admin)) + '</textarea>' +
+      '<div style="margin-top:8px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;"><button class="btn btn-primary" data-action="dash-admin-note">Save note</button>' +
+      (n.adminUpdated ? '<span class="dash-meta" style="margin:0;">Saved ' + esc(fmtStamp(n.adminUpdated)) + '</span>' : '') + '</div>';
+    var theirTasks = D.tasks.filter(function(x){ return x.staffId===who.id; }).sort(function(a, b){ return (a.done - b.done) || ((a.due || '9999') < (b.due || '9999') ? -1 : 1); });
+    out += '<label class="field-label" style="margin-top:16px;">Tasks for ' + esc(who.name) + '</label>' +
+      '<input type="text" id="taskText" data-draft="task_' + who.id + '" maxlength="300" placeholder="e.g. Restock helium balloons" value="' + esc(draftVal('task_' + who.id, '')) + '">' +
+      '<div style="display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;"><span style="font-size:0.8rem; color:var(--muted);">Due (optional)</span><input type="date" id="taskDue" style="width:auto;">' +
+      '<button class="btn btn-primary" data-action="dash-task-add">Add task</button></div>';
+    if(theirTasks.length){
+      out += '<div style="margin-top:8px;">' + theirTasks.map(function(x){
+        return '<div class="tick-row' + (x.done ? ' done' : '') + '"><span class="tick' + (x.done ? ' on' : '') + '" style="cursor:default;">' + (x.done ? '✓' : '') + '</span>' +
+          '<span class="tick-text">' + esc(x.text) + dueBadge(x.due, x.done) + (x.done && x.doneAt ? '<span class="tick-by">Done ' + esc(fmtStamp(x.doneAt)) + '</span>' : '') + '</span>' +
+          '<button class="icon-btn" data-action="dash-task-del" data-task="' + x.id + '">Delete</button></div>';
+      }).join('') + '</div>';
+      if(theirTasks.some(function(x){ return x.done; })) out += '<button class="ghost-btn" data-action="dash-task-clear" style="margin-top:6px;">Clear done tasks</button>';
+    } else {
+      out += '<p class="section-sub" style="margin:8px 0 0;">No tasks for ' + esc(who.name) + ' yet.</p>';
+    }
+    out += '<label class="field-label" style="margin-top:16px;">' + esc(who.name) + '\'s own notes</label>' +
+      (n.mine ? '<div class="card" style="background:var(--surface-2); margin:0;"><p class="dash-note">' + esc(n.mine) + '</p>' + (n.mineUpdated ? '<div class="dash-meta">Saved ' + esc(fmtStamp(n.mineUpdated)) + '</div>' : '') + '</div>'
+              : '<p class="section-sub" style="margin:0;">' + esc(who.name) + ' hasn\'t written any notes.</p>');
+  }
+  out += '</div>';
+
+  // team task overview
+  var openAll = D.tasks.filter(function(x){ return !x.done; });
+  out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">Team tasks</h2>';
+  if(!D.tasks.length) out += '<p class="section-sub" style="margin:0;">No tasks set yet.</p>';
+  else {
+    staffList.forEach(function(s){
+      var mine = D.tasks.filter(function(x){ return x.staffId===s.id; });
+      if(!mine.length) return;
+      var od = mine.filter(function(x){ return !x.done && x.due && x.due < todayISO(); }).length;
+      var dn = mine.filter(function(x){ return x.done; }).length;
+      out += '<div class="avail-summary-row"><div class="avail-name">' + esc(s.name) + '</div><div style="font-size:0.82rem;">' + dn + '/' + mine.length + ' done' +
+        (od ? ' · <span style="color:var(--status-open); font-weight:700;">' + od + ' overdue</span>' : '') + '</div></div>';
+    });
+    if(!openAll.length) out += '<p class="section-sub" style="margin:6px 0 0;">Everything is done. 🎉</p>';
+  }
+  out += '</div>';
+
+  // checklists
+  var today = todayISO();
+  out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">Store checklists</h2>' +
+    '<p class="section-sub">Checklists show on the dashboard of whoever is rostered on that day. Ticks reset each day.</p>';
+  D.checklists.forEach(function(l){
+    var ticks = (D.checks[today] || {})[l.id] || {};
+    var items = l.items || [], done = items.filter(function(it){ return ticks[it.id]; }).length;
+    var daysTxt = (!l.days || !l.days.length || l.days.length === 7) ? 'Every day' : DAY_KEYS.filter(function(k){ return l.days.indexOf(k) >= 0; }).map(function(k){ return WEEKDAY_LABEL[k]; }).join(', ');
+    var rolesTxt = (!l.roles || !l.roles.length) ? 'everyone' : l.roles.map(roleLabel).join(', ');
+    var todayOn = listsForDay([l], today, null).length;
+    out += '<div class="avail-summary-row" style="align-items:flex-start;"><div style="flex:1 1 auto;"><strong style="font-size:0.88rem;">' + esc(l.name) + '</strong>' +
+      '<div style="font-size:0.76rem; color:var(--muted);">' + items.length + ' items · ' + esc(daysTxt) + ' · for ' + esc(rolesTxt) + '</div>' +
+      (todayOn ? '<div style="font-size:0.78rem; margin-top:2px;">Today: <b>' + done + '/' + items.length + '</b> done</div>' : '') + '</div>' +
+      '<div style="display:flex; gap:6px;">' + (todayOn ? '<button class="icon-btn" data-action="dash-list-view" data-id="' + l.id + '">Today</button>' : '') +
+      '<button class="icon-btn" data-action="dash-list-edit" data-id="' + l.id + '">Edit</button><button class="icon-btn" data-action="dash-list-del" data-id="' + l.id + '">Delete</button></div></div>';
+    if(ui.dashViewList === l.id && todayOn) out += checklistCardHTML(l, D.checks, today, false);
+  });
+  var ed = ui.dashEditList ? (D.checklists.find(function(l){ return l.id===ui.dashEditList; }) || null) : null;
+  if(ui.dashEditList === 'new' || ed){
+    var e = ed || {name:'', items:[], days:[], roles:[]};
+    out += '<div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);"><strong style="font-size:0.88rem;">' + (ed ? 'Edit checklist' : 'New checklist') + '</strong>' +
+      '<label class="field-label">Name</label><input type="text" id="clName" maxlength="80" placeholder="e.g. Opening" value="' + esc(e.name) + '">' +
+      '<label class="field-label">Items (one per line)</label><textarea rows="6" id="clItems" placeholder="Turn on lights and music&#10;Count the till float&#10;Fill the helium tank">' + esc((e.items || []).map(function(it){ return it.text; }).join('\n')) + '</textarea>' +
+      '<label class="field-label">Days (none ticked = every day)</label><div class="chip-row">' + DAY_KEYS.map(function(k){
+        return '<label><input type="checkbox" class="cl-day" value="' + k + '"' + ((e.days || []).indexOf(k) >= 0 ? ' checked' : '') + '>' + WEEKDAY_LABEL[k] + '</label>'; }).join('') + '</div>' +
+      '<label class="field-label">Who sees it (none ticked = everyone working)</label><div class="chip-row">' + ROLE_ORDER.map(function(r){
+        return '<label><input type="checkbox" class="cl-role" value="' + r + '"' + ((e.roles || []).indexOf(r) >= 0 ? ' checked' : '') + '>' + roleLabel(r) + '</label>'; }).join('') + '</div>' +
+      '<div style="display:flex; gap:8px; margin-top:10px;"><button class="btn btn-primary" data-action="dash-list-save">Save checklist</button><button class="btn btn-secondary" data-action="dash-list-cancel">Cancel</button></div></div>';
+  } else {
+    out += '<button class="btn btn-secondary" data-action="dash-list-new" style="margin-top:10px;">+ New checklist</button>';
+  }
+  out += '</div>';
+
+  // handovers
+  out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">Handover notes (last 30 days)</h2>' + handoversHTML(D.handovers, true) + '</div>';
+  return out;
+}
+
 // ---------- quick grid editing ----------
 // Admin grid edits (add / edit / remove / copy / drag) are collected here per
 // week and published together with one "Save & publish". Each entry keeps the
@@ -1067,6 +1330,9 @@ function cellViewHTML(ctx, shift){
   }
   if(ui.mgrUnlocked){
     var who = assignee || original;
+    if(shift.staffId && shift.status !== 'open'){
+      actions += '<button class="btn btn-secondary" data-action="admin-release" data-shift="' + shift.id + '">Release for ' + esc(assignee ? assignee.name : 'them') + '</button>';
+    }
     actions += '<button class="btn btn-secondary" data-action="cell-edit-start">Edit shift</button>' +
       '<button class="btn btn-secondary" data-action="cell-copy">Copy to other squares</button>' +
       (who ? '<button class="btn btn-secondary" data-action="cell-message">Message ' + esc(who.name) + '</button>' : '') +
@@ -1205,15 +1471,17 @@ function staffSave(action, payload, successMsg, opts){
       return;
     }
     if(res && res.error === 'bad_pin'){
-      logoutStaff(); revertUnsaved();
+      logoutStaff(); revertUnsaved(); if(opts.onFail) opts.onFail();
       toast('Your PIN has changed — please log in again.');
       return;
     }
     if(res && res.state) applyServer(res); else revertUnsaved();
+    if(opts.onFail && !(res && res.dash)) opts.onFail();
     toast((res && res.message) || 'That didn\'t save. Please try again.');
   }, function(err){
     setSaving(false);
     revertUnsaved();
+    if(opts.onFail) opts.onFail();
     if(err && err.serverMessage) toast(failMsg(err));
     else if(opts.request) showSendToAdmin(opts.request, true);
     else toast(failMsg(err));
@@ -1372,6 +1640,7 @@ function renderIdentityBar(){
 }
 
 var TABS = [
+  {key:'dash', label:'Dashboard'},
   {key:'my', label:'My Shifts'},
   {key:'week', label:'Week'},
   {key:'avail', label:'Availability'},
@@ -1384,11 +1653,13 @@ function renderTabs(){
   return '<nav class="tabs">' + TABS.filter(function(t){ return t.key!=='budget' || ui.mgrUnlocked; }).map(function(t){
     var label = esc(t.label);
     if(t.key==='mgr' && pendingCount) label += '<span class="tab-badge">' + pendingCount + '</span>';
+    if(t.key==='dash'){ var md = myDashView(); var openT = md ? md.tasks.filter(function(x){ return !x.done; }).length : 0; if(openT) label += '<span class="tab-badge">' + openT + '</span>'; }
     return '<button class="tab-btn' + (ui.tab===t.key?' active':'') + '" data-action="tab" data-tab="' + t.key + '">' + label + '</button>';
   }).join('') + '</nav>';
 }
 
 function renderTabContent(){
+  if(ui.tab==='dash') return renderDashboard();
   if(ui.tab==='my') return renderMyShifts();
   if(ui.tab==='week') return renderFullWeek();
   if(ui.tab==='avail') return ui._availDraft ? renderAvailabilityFromDraft() : renderAvailability();
@@ -2192,6 +2463,8 @@ function onClick(e){
         persistMe(loginId);
         ui.myPin = loginPin;
         try{ localStorage.setItem('roster_pin_v1', loginPin); }catch(e2){}
+        ui.myDash = res.dash || null;
+        if(ui.tab === 'my' || ui.tab === 'dash') persistTab('dash');
         render();
       } else {
         toast((res && res.message) || 'Incorrect PIN for that name.');
@@ -2342,6 +2615,128 @@ function onClick(e){
     var msgShift = findShiftInWeek(ctxMsg.weekKey, ctxMsg.dayKey, ctxMsg.staffId);
     var msgStaff = msgShift && staffById(msgShift.staffId || msgShift.originalStaffId);
     if(msgStaff) document.getElementById('detailBox').innerHTML = notifyPanelHTML(ctxMsg, msgStaff, msgShift);
+    return;
+  }
+  // ---- dashboard (staff) ----
+  if(action==='dash-task' || action==='dash-check' || action==='dash-ho-add' || action==='dash-ho-remove' || action==='dash-mine-save'){
+    if(!ui.me || !ui.myPin){ toast('Log in with your name and PIN first.'); return; }
+    var md = ui.myDash, snap = md ? cloneJ(md) : null;
+    var restore = function(){ if(snap) ui.myDash = snap; render(); };
+    if(action==='dash-task'){
+      var tId = el.getAttribute('data-task'), tDone = el.getAttribute('data-done')==='1';
+      if(md){ var tk = md.tasks.find(function(x){ return x.id===tId; }); if(tk){ tk.done = tDone; tk.doneAt = tDone ? new Date().toISOString() : ''; } }
+      render();
+      staffSave('task-toggle', {taskId: tId, done: tDone}, tDone ? 'Task done ✓' : '', {onFail: restore});
+    } else if(action==='dash-check'){
+      var cl = el.getAttribute('data-list'), ci = el.getAttribute('data-item'), cDone = el.getAttribute('data-done')==='1', day = todayISO();
+      if(md){ md.checks[day] = md.checks[day] || {}; md.checks[day][cl] = md.checks[day][cl] || {};
+        if(cDone) md.checks[day][cl][ci] = {by: ui.me, at: new Date().toISOString()}; else delete md.checks[day][cl][ci]; }
+      render();
+      staffSave('check-toggle', {listId: cl, itemId: ci, date: day, done: cDone}, '', {onFail: restore});
+    } else if(action==='dash-ho-add'){
+      var hoText = (document.getElementById('hoText').value || '').trim();
+      if(!hoText){ toast('Write your handover note first.'); return; }
+      var hoId = dashId('ho');
+      if(md) md.handovers.push({id: hoId, staffId: ui.me, text: hoText, at: new Date().toISOString()});
+      delete ui.drafts.ho; render();
+      staffSave('handover-add', {id: hoId, text: hoText}, 'Handover note posted.', {onFail: function(){ ui.drafts.ho = hoText; restore(); }});
+    } else if(action==='dash-ho-remove'){
+      var hrId = el.getAttribute('data-id');
+      if(md) md.handovers = md.handovers.filter(function(h){ return h.id !== hrId; });
+      render();
+      staffSave('handover-remove', {id: hrId}, 'Note deleted.', {onFail: restore});
+    } else {
+      var mineText = document.getElementById('myNotes').value;
+      if(md){ md.note = md.note || {}; md.note.mine = mineText; md.note.mineUpdated = new Date().toISOString(); }
+      delete ui.drafts.mine; render();
+      staffSave('my-notes', {text: mineText}, 'Notes saved.', {onFail: function(){ ui.drafts.mine = mineText; restore(); }});
+    }
+    return;
+  }
+  // ---- dashboard (admin) ----
+  if(action==='dash-admin-note'){
+    var anId = ui.dashStaff, anText = document.getElementById('dashAdminNote').value;
+    var anKey = 'admin_' + anId;
+    delete ui.drafts[anKey];
+    adminCommit(function(){ var D = ensureDash(); D.notes[anId] = D.notes[anId] || {}; D.notes[anId].admin = anText.slice(0, 5000); D.notes[anId].adminUpdated = new Date().toISOString(); },
+      'Note saved for ' + ((staffByIdRaw(anId) || {}).name || 'them') + '.', {onFail: function(){ ui.drafts[anKey] = anText; render(); }});
+    return;
+  }
+  if(action==='dash-task-add'){
+    var taId = ui.dashStaff, taText = document.getElementById('taskText').value.trim(), taDue = document.getElementById('taskDue').value;
+    if(!taText){ toast('Write the task first.'); return; }
+    delete ui.drafts['task_' + taId];
+    var newTask = {id: dashId('tk'), staffId: taId, text: taText.slice(0, 300), due: taDue || '', done: false, doneAt: '', createdAt: new Date().toISOString()};
+    adminCommit(function(){ ensureDash().tasks.push(cloneJ(newTask)); }, 'Task added.', {onFail: function(){ ui.drafts['task_' + taId] = taText; render(); }});
+    return;
+  }
+  if(action==='dash-task-del'){
+    var tdId = el.getAttribute('data-task');
+    adminCommit(function(){ var D = ensureDash(); D.tasks = D.tasks.filter(function(x){ return x.id !== tdId; }); }, 'Task deleted.');
+    return;
+  }
+  if(action==='dash-task-clear'){
+    var tcId = ui.dashStaff;
+    adminCommit(function(){ var D = ensureDash(); D.tasks = D.tasks.filter(function(x){ return !(x.staffId===tcId && x.done); }); }, 'Done tasks cleared.');
+    return;
+  }
+  if(action==='dash-list-new'){ ui.dashEditList = 'new'; render(); return; }
+  if(action==='dash-list-edit'){ ui.dashEditList = el.getAttribute('data-id'); render(); return; }
+  if(action==='dash-list-cancel'){ ui.dashEditList = null; render(); return; }
+  if(action==='dash-list-view'){ var lv = el.getAttribute('data-id'); ui.dashViewList = ui.dashViewList === lv ? null : lv; render(); return; }
+  if(action==='dash-list-save'){
+    var clName = document.getElementById('clName').value.trim();
+    var clLines = document.getElementById('clItems').value.split('\n').map(function(x){ return x.trim(); }).filter(Boolean).slice(0, 50);
+    if(!clName){ toast('Give the checklist a name.'); return; }
+    if(!clLines.length){ toast('Add at least one item.'); return; }
+    var clDays = Array.prototype.map.call(document.querySelectorAll('.cl-day:checked'), function(x){ return x.value; });
+    var clRoles = Array.prototype.map.call(document.querySelectorAll('.cl-role:checked'), function(x){ return x.value; });
+    var editId = ui.dashEditList === 'new' ? null : ui.dashEditList;
+    ui.dashEditList = null;
+    adminCommit(function(){
+      var D = ensureDash();
+      var old = editId ? D.checklists.find(function(l){ return l.id===editId; }) : null;
+      // Keep item ids for unchanged wording so today's ticks stay.
+      var oldIds = {}; (old ? old.items : []).forEach(function(it){ oldIds[it.text] = it.id; });
+      var items = clLines.map(function(txt){ return {id: oldIds[txt] || dashId('it'), text: txt.slice(0, 200)}; });
+      if(old){ old.name = clName.slice(0, 80); old.items = items; old.days = clDays; old.roles = clRoles; }
+      else D.checklists.push({id: dashId('cl'), name: clName.slice(0, 80), items: items, days: clDays, roles: clRoles});
+    }, 'Checklist saved.');
+    return;
+  }
+  if(action==='dash-list-del'){
+    var dlId = el.getAttribute('data-id');
+    var dlList = (STATE.dash && STATE.dash.checklists || []).find(function(l){ return l.id===dlId; });
+    showConfirm('Delete the "' + (dlList ? dlList.name : '') + '" checklist?', function(){
+      adminCommit(function(){ var D = ensureDash(); D.checklists = D.checklists.filter(function(l){ return l.id !== dlId; }); }, 'Checklist deleted.');
+    });
+    return;
+  }
+  if(action==='dash-ho-admin-remove'){
+    var haId = el.getAttribute('data-id');
+    adminCommit(function(){ var D = ensureDash(); D.handovers = D.handovers.filter(function(h){ return h.id !== haId; }); }, 'Note deleted.');
+    return;
+  }
+  if(action==='admin-release'){
+    var ctxRel = ui.cellCtx; if(!ctxRel) return;
+    var relId = el.getAttribute('data-shift');
+    var relShift = gridShifts(ctxRel.weekKey).find(function(x){ return x.id===relId; });
+    if(!relShift || !relShift.staffId) return;
+    var relWho = staffById(relShift.staffId);
+    var relRole = shiftRole(relShift);
+    var relDay = weekDaysFor(ctxRel.weekKey).find(function(d){ return d.key===relShift.day; });
+    var relOnly = CLAIM_RULES[relRole] ? ' Only ' + claimOnlyLabel({role: relRole}).replace(/ only$/, '') + ' can pick it up.' : ' Anyone can pick it up.';
+    var relWeek = ctxRel.weekKey;
+    hideDetail();
+    showConfirm('Release ' + (relWho ? relWho.name + '\'s' : 'this') + ' shift on ' + (relDay ? relDay.label + ' ' + relDay.date : '') + ', ' + fmtTime(relShift.start) + '–' + fmtTime(relShift.end) + '? It becomes an open shift.' + relOnly, function(){
+      adminCommit(function(){
+        var s = getWeekShiftsArray(relWeek).find(function(x){ return x.id===relId; });
+        if(!s || !s.staffId) return;
+        s.role = shiftRole(s);
+        s.originalStaffId = s.staffId; s.staffId = null; s.status = 'open';
+        delete s.editRequest;
+      }, 'Shift released for ' + (relWho ? relWho.name : 'them') + '. It\'s now open for pickup.');
+    });
     return;
   }
   if(action==='download-pdf'){ downloadRosterPdf(); return; }
@@ -2667,6 +3062,7 @@ function onChange(e){
   var el = e.target.closest('[data-action]');
   if(!el) return;
   var action = el.getAttribute('data-action');
+  if(action==='dash-pick-staff'){ ui.dashStaff = el.value; render(); return; }
   if(action==='set-avail-time'){
     if(!ui.me) return;
     ensureAvailDraft();
@@ -2818,6 +3214,10 @@ window.addEventListener('beforeunload', function(e){
   if(ui.mgrUnlocked && changeCount()){ e.preventDefault(); e.returnValue = ''; }
 });
 
+document.addEventListener('input', function(e){
+  var k = e.target && e.target.getAttribute && e.target.getAttribute('data-draft');
+  if(k) ui.drafts[k] = e.target.value;
+});
 document.addEventListener('click', onClick);
 document.addEventListener('change', onChange);
 document.addEventListener('keydown', function(e){
@@ -2827,6 +3227,13 @@ document.addEventListener('keydown', function(e){
 });
 
 startPolling();
+
+if(ui.me && ui.myPin){
+  server('getMyDash', [ui.me, ui.myPin]).then(function(res){
+    if(res && res.ok){ ui.myDash = res.dash; render(); }
+    else if(res && res.error === 'bad_pin'){ logoutStaff(); render(); }
+  }, function(){});
+}
 
 render();
 }
