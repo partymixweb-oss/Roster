@@ -1187,9 +1187,26 @@ function pdfStr(s){
 function buildRosterPdf(weekKey){
   var W = 842, H = 595, M = 28;                       // A4 landscape, points
   var days = weekDaysFor(weekKey), shifts = weekShiftsReadOnly(weekKey);
-  var staff = STATE.staff.slice();
+  // Only people with at least one shift (or a released one) that week.
+  var staff = STATE.staff.filter(function(s){ return days.some(function(d){ return findCell(shifts, s.id, d.key); }); });
   var nameW = 108, hoursW = 46, dayW = (W - 2*M - nameW - hoursW) / 7;
-  var headH = 30, rowH = 34;
+  var headH = 30;
+  // The weekly notice is wrapped onto a few lines under the table.
+  var notes = weekKey === weekStartKey() ? (STATE.weekNotes || '').trim() : ((STATE.weeks[weekKey] || {}).weekNotes || '').trim();
+  var noteLines = [];
+  if(notes){
+    var words = ('Notice: ' + notes.replace(/\s+/g, ' ')).split(' '), cur = '';
+    words.forEach(function(w){
+      var tryLine = cur ? cur + ' ' + w : w;
+      if(pdfTextWidth(tryLine, 9, false) > W - 2*M && cur){ noteLines.push(cur); cur = w; } else cur = tryLine;
+    });
+    if(cur) noteLines.push(cur);
+    if(noteLines.length > 4){ noteLines = noteLines.slice(0, 4); noteLines[3] = pdfFit(noteLines[3] + '…', 9, false, W - 2*M); }
+  }
+  // Everything fits on one page: rows shrink when there are lots of people.
+  var avail = H - M - (M + 46 + headH) - (noteLines.length ? noteLines.length * 12 + 10 : 0);
+  var rowH = Math.min(34, avail / Math.max(staff.length, 1));
+  var k = Math.max(0.55, rowH / 34), twoLines = rowH >= 20;
   var pages = [], ops = null, y = 0;
   function text(s, x, yy, size, bold, align, maxW){
     if(maxW) s = pdfFit(s, size, bold, maxW);
@@ -1221,27 +1238,28 @@ function buildRosterPdf(weekKey){
   newPage();
   var gridTop = M + 46;
   staff.forEach(function(s){
-    if(y + rowH > H - M - 24){ finishGrid(gridTop, y); newPage(); gridTop = M + 46; }
     var total = 0;
-    text(s.name, M + 6, y + rowH/2 + 3, 10, true, 'left', nameW - 10);
+    text(s.name, M + 6, y + rowH/2 + 3.5*k, 10*k, true, 'left', nameW - 10);
     days.forEach(function(d, i){
       var sh = findCell(shifts, s.id, d.key);
       if(!sh) return;
       var cx = colX[i+1] + dayW/2;
       var isOpen = sh.status === 'open' && !sh.staffId;
       if(!isOpen) total += shiftHours(sh);
-      text((isOpen ? 'OPEN ' : '') + fmtTime(sh.start) + '–' + fmtTime(sh.end), cx, y + 15, 9.5, true, 'center', dayW - 6);
-      text(roleLabel(shiftRole(sh)), cx, y + 26, 7, false, 'center', dayW - 6);
+      var timeTxt = (isOpen ? 'OPEN ' : '') + fmtTime(sh.start) + '–' + fmtTime(sh.end);
+      if(twoLines){
+        text(timeTxt, cx, y + rowH*0.44, 9.5*k, true, 'center', dayW - 6);
+        text(roleLabel(shiftRole(sh)), cx, y + rowH*0.44 + 10.5*k, 7*k, false, 'center', dayW - 6);
+      } else {
+        text(timeTxt, cx, y + rowH/2 + 3*k, 9.5*k, true, 'center', dayW - 6);
+      }
     });
-    text(total ? (Math.round(total*100)/100) + 'h' : '', W - M - 6, y + rowH/2 + 3, 9.5, false, 'right');
+    text(total ? (Math.round(total*100)/100) + 'h' : '', W - M - 6, y + rowH/2 + 3.5*k, 9.5*k, false, 'right');
     y += rowH; line(M, y, W - M, y, 0.5);
   });
   finishGrid(gridTop, y);
-  var notes = weekKey === weekStartKey() ? (STATE.weekNotes || '').trim() : ((STATE.weeks[weekKey] || {}).weekNotes || '').trim();
-  if(notes && y + 30 < H - M){
-    text('Notice: ' + notes.replace(/\s+/g, ' '), M, y + 18, 9, false, 'left', W - 2*M);
-  }
-  pages.forEach(function(p, i){ if(pages.length > 1){ ops = p; text('Page ' + (i+1) + ' of ' + pages.length, W - M, H - M + 10, 8, false, 'right'); } });
+  if(!staff.length) text('No shifts this week.', M + 6, y + 20, 10, false);
+  noteLines.forEach(function(l, i){ text(l, M, y + 18 + i*12, 9, false); });
 
   // assemble the file
   var objs = [];
