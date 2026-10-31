@@ -239,6 +239,15 @@
     content:''; position:absolute; left:50%; bottom:3px; transform:translateX(-50%);
     width:16px; height:3px; border-radius:999px; background:var(--accent);
   }
+  .clock-card{display:flex; align-items:center; gap:12px; flex-wrap:wrap;}
+  .clock-card .clock-state{flex:1 1 200px;}
+  .clock-big{font-size:1.15rem; font-weight:800;}
+  .clock-btn{font-size:1.05rem; padding:14px 26px;}
+  .ts-table{width:100%; border-collapse:collapse; font-size:0.8rem;}
+  .ts-table th, .ts-table td{padding:6px 6px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top;}
+  .ts-table th{font-size:0.68rem; text-transform:uppercase; color:var(--muted);}
+  .flag{display:inline-block; font-size:0.66rem; font-weight:700; padding:1px 6px; border-radius:999px; background:var(--status-open-soft); color:var(--status-open); margin:2px 4px 0 0;}
+  .flag.warn{background:var(--status-pending-soft); color:var(--status-pending);}
   .dash-note{white-space:pre-wrap; font-size:0.92rem; line-height:1.5; margin:0;}
   .dash-meta{font-size:0.74rem; color:var(--muted); margin-top:6px;}
   .tick-row{display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px solid var(--border);}
@@ -467,6 +476,10 @@ function normalizeState(st){
   st.roleInfo = st.roleInfo || {};
   st.staff.forEach(normalizeRates);
   // Dashboard data only arrives for the admin (staff get their own part via ui.myDash).
+  if(st.clock){
+    st.clock.entries = st.clock.entries || []; st.clock.settings = st.clock.settings || {};
+    st.clock.sent = st.clock.sent || {}; st.clock.saved = st.clock.saved || {};
+  }
   if(st.dash){
     st.dash.notes = st.dash.notes || {}; st.dash.tasks = st.dash.tasks || []; st.dash.checklists = st.dash.checklists || [];
     st.dash.checks = st.dash.checks || {}; st.dash.handovers = st.dash.handovers || [];
@@ -793,6 +806,233 @@ function hideConfirm(){
 // it — a staff member can accept/decline/claim their own shifts on the live
 // week; an admin can additionally add, edit, or remove any shift on any
 // week (used to pre-plan future weeks or correct past/current ones).
+// ---------- clock in / out ----------
+function isoToHM(isoTs){ var d = new Date(isoTs); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+function fmtClock(isoTs){ return isoTs ? fmtTime(isoToHM(isoTs)) : ''; }
+function fmtDur(ms){ var m = Math.max(0, Math.round(ms / 60000)); return Math.floor(m / 60) + 'h ' + pad2(m % 60) + 'm'; }
+function entryHours(e){ if(!e.out) return 0; return Math.max(0, Math.round(((new Date(e.out) - new Date(e['in'])) / 3600000 - (Number(e.breakMins) || 0) / 60) * 100) / 100); }
+function fmtHrs(h){ return (Math.round(h * 100) / 100) + 'h'; }
+function clockCardHTML(c){
+  if(!c) return '';
+  var today = todayISO(), sh = shiftOnDate(ui.me, today);
+  var out = '<div class="card clock-card" style="border-color:' + (c.open ? 'var(--status-confirmed)' : 'var(--border)') + ';"><div class="clock-state">';
+  if(c.open){
+    out += '<div class="clock-big">🟢 Clocked in since ' + esc(fmtClock(c.open['in'])) + '</div>' +
+      '<div class="section-sub" style="margin:2px 0 0;">On the clock: <b data-since="' + esc(c.open['in']) + '">' + fmtDur(Date.now() - new Date(c.open['in'])) + '</b>' +
+      (sh ? ' · rostered ' + fmtTime(sh.start) + '–' + fmtTime(sh.end) : '') + '</div>';
+  } else {
+    out += '<div class="clock-big">⏱ Not clocked in</div>' +
+      '<div class="section-sub" style="margin:2px 0 0;">' + (sh ? 'You\'re rostered today ' + fmtTime(sh.start) + '–' + fmtTime(sh.end) + '.' : 'You\'re not rostered today.') +
+      (c.storeSet ? ' You need to be at the store to clock in.' : '') + '</div>';
+  }
+  out += '</div><button class="btn ' + (c.open ? 'btn-danger' : 'btn-primary') + ' clock-btn" data-action="' + (c.open ? 'clock-out' : 'clock-in') + '"' + (ui.clockBusy ? ' disabled' : '') + '>' +
+    (ui.clockBusy ? 'Checking location…' : (c.open ? 'Clock out' : 'Clock in')) + '</button></div>';
+  var recent = (c.recent || []).filter(function(e){ return e.out; }).sort(function(a, b){ return a['in'] < b['in'] ? 1 : -1; }).slice(0, 5);
+  if(recent.length){
+    out += '<details class="card" style="padding:10px 14px;"><summary style="cursor:pointer; font-size:0.85rem; font-weight:700;">My recent hours</summary>' +
+      recent.map(function(e){ return '<div class="avail-summary-row" style="font-size:0.84rem;"><div class="avail-name">' + esc(fmtDateDisplay(e.date)) + '</div><div>' +
+        esc(fmtClock(e['in'])) + '–' + esc(fmtClock(e.out)) + (e.breakMins ? ' (−' + e.breakMins + 'm break)' : '') + ' · <b>' + fmtHrs(entryHours(e)) + '</b></div></div>'; }).join('') + '</details>';
+  }
+  return out;
+}
+function getLocation(){
+  return new Promise(function(resolve, reject){
+    if(!navigator.geolocation){ reject(new Error('This phone or browser can\'t share its location.')); return; }
+    var done = false;
+    // Some browsers never answer if the permission pop-up is ignored.
+    var guard = setTimeout(function(){ if(!done){ done = true; reject(new Error('Couldn\'t get your location. Tap Allow when your phone asks to share location, then try again.')); } }, 20000);
+    navigator.geolocation.getCurrentPosition(function(pos){
+      if(done) return; done = true; clearTimeout(guard);
+      resolve({lat: pos.coords.latitude, lng: pos.coords.longitude, acc: Math.round(pos.coords.accuracy || 0)});
+    }, function(err){
+      if(done) return; done = true; clearTimeout(guard);
+      reject(new Error(err && err.code === 1 ? 'Location is blocked. Allow location for this site in your browser settings, then try again.' : 'Couldn\'t get your location. Check location is turned on and try again.'));
+    }, {enableHighAccuracy: true, timeout: 15000, maximumAge: 0});
+  });
+}
+function doClock(kind){
+  var d = myDashView(); if(!d || !d.clock) return;
+  var needLoc = d.clock.storeSet;
+  var go = function(loc){
+    ui.clockBusy = false;
+    var before = d.clock.open;
+    staffSave(kind, loc || {}, '', {onSuccess: function(){
+      var c2 = (myDashView() || {}).clock || {};
+      if(kind === 'clock-in' && c2.open) celebrate('Clocked in at ' + fmtClock(c2.open['in']) + '. Have a great shift! 🎈');
+      else if(kind === 'clock-out' && before){ var last = (c2.recent || []).filter(function(e){ return e.id === before.id; })[0]; toast('Clocked out' + (last ? ' at ' + fmtClock(last.out) + ' · ' + fmtHrs(entryHours(last)) : '') + '. Thanks!'); }
+    }, onFail: function(){ render(); }});
+  };
+  if(!needLoc){ go(null); return; }
+  ui.clockBusy = true; render();
+  getLocation().then(go, function(err){
+    if(kind === 'clock-out'){ go(null); return; }   // never stop someone clocking out
+    ui.clockBusy = false; render(); toast(err.message);
+  });
+}
+setInterval(function(){
+  document.querySelectorAll('[data-since]').forEach(function(el){ el.textContent = fmtDur(Date.now() - new Date(el.getAttribute('data-since'))); });
+}, 30000);
+
+// Admin timesheets for the week shown in the Week tab.
+function weekEntries(weekKey){
+  var days = weekDaysFor(weekKey), from = days[0].iso, to = days[6].iso;
+  return ((STATE.clock || {}).entries || []).filter(function(e){ return e.date >= from && e.date <= to; });
+}
+function entryFlags(e, sh, radius){
+  var f = [];
+  if(!e.out) f.push(['No clock-out', '']);
+  if(sh){
+    var lateM = Math.round((new Date(e['in']) - new Date(e.date + 'T' + sh.start + ':00')) / 60000);
+    if(lateM > 5) f.push(['Late ' + lateM + 'm', 'warn']);
+    if(e.out){ var earlyM = Math.round((new Date(e.date + 'T' + sh.end + ':00') - new Date(e.out)) / 60000); if(earlyM > 5) f.push(['Left ' + earlyM + 'm early', 'warn']); }
+  } else f.push(['Not rostered', 'warn']);
+  if(typeof e.outDist === 'number' && e.outDist > radius * 2) f.push(['Clocked out ' + (e.outDist >= 1000 ? (Math.round(e.outDist / 100) / 10) + ' km' : e.outDist + ' m') + ' away', 'warn']);
+  if(e.edited) f.push(['Edited', 'warn']);
+  return f;
+}
+function timesheetData(weekKey){
+  var days = weekDaysFor(weekKey), entries = weekEntries(weekKey), shifts = weekShiftsReadOnly(weekKey);
+  var radius = Number(((STATE.clock || {}).settings || {}).radius) || 200;
+  var people = [];
+  STATE.staff.forEach(function(s){
+    var rows = [], tot = {weekday:0, sat:0, sun:0};
+    days.forEach(function(d){
+      var sh = shifts.find(function(x){ return x.staffId===s.id && x.day===d.key; });
+      var es = entries.filter(function(e){ return e.staffId===s.id && e.date===d.iso; }).sort(function(a, b){ return a['in'] < b['in'] ? -1 : 1; });
+      if(!sh && !es.length) return;
+      var hrs = es.reduce(function(n, e){ return n + entryHours(e); }, 0);
+      tot[dayType(d.key)] += hrs;
+      var missed = sh && !es.length && d.iso < todayISO();
+      rows.push({day:d, shift:sh, entries:es, hours:hrs, missed:missed, radius:radius});
+    });
+    if(rows.length) people.push({staff:s, rows:rows, tot:tot, total: tot.weekday + tot.sat + tot.sun});
+  });
+  return {days:days, people:people};
+}
+function csvOf(rows){ return '﻿' + rows.map(function(r){ return r.map(function(v){ v = String(v == null ? '' : v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(','); }).join('\r\n'); }
+function downloadText(name, text, type){
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], {type: type})); a.download = name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 30000);
+}
+function xeroCsv(weekKey){
+  var ts = timesheetData(weekKey);
+  var head = ['Employee', 'Earnings rate'].concat(ts.days.map(function(d){ return d.label + ' ' + d.date; })).concat(['Total hours']);
+  var rows = [head];
+  var rates = [['weekday', 'Ordinary Hours (weekdays)'], ['sat', 'Saturday'], ['sun', 'Sunday']];
+  ts.people.forEach(function(p){
+    rates.forEach(function(r){
+      if(!p.tot[r[0]]) return;
+      rows.push([p.staff.name, r[1]].concat(ts.days.map(function(d){
+        if(dayType(d.key) !== r[0]) return '';
+        var row = p.rows.find(function(x){ return x.day.iso===d.iso; });
+        return row && row.hours ? Math.round(row.hours * 100) / 100 : '';
+      })).concat([Math.round(p.tot[r[0]] * 100) / 100]));
+    });
+  });
+  return csvOf(rows);
+}
+function logCsv(weekKey){
+  var rows = [['Employee', 'Date', 'Rostered', 'Clock in', 'Clock out', 'Break (mins)', 'Hours', 'Flags', 'Note']];
+  timesheetData(weekKey).people.forEach(function(p){
+    p.rows.forEach(function(r){
+      var ros = r.shift ? fmtTime(r.shift.start) + '–' + fmtTime(r.shift.end) : '';
+      if(!r.entries.length) rows.push([p.staff.name, r.day.iso, ros, '', '', '', 0, r.missed ? 'No clock-in' : '', '']);
+      r.entries.forEach(function(e){
+        rows.push([p.staff.name, r.day.iso, ros, fmtClock(e['in']), e.out ? fmtClock(e.out) : 'NOT CLOCKED OUT', e.breakMins || 0, entryHours(e),
+          entryFlags(e, r.shift, r.radius).map(function(f){ return f[0]; }).join('; '), e.note || '']);
+      });
+    });
+  });
+  return csvOf(rows);
+}
+function renderTimesheets(){
+  var viewed = resolveViewedWeek(), C = STATE.clock || {entries:[], settings:{}}, S = C.settings || {};
+  var out = '<h2 class="section-title">Timesheets</h2>' +
+    '<p class="section-sub">Clock-in hours for each person. Check and fix anything flagged, then download the Xero timesheet. Last week is also saved to your Google Sheet every Monday morning.</p>';
+  out += '<div class="week-nav"><button class="ghost-btn" data-action="week-prev">‹ Prev</button><div class="week-nav-label"><div style="font-weight:800; font-size:0.92rem;">' + esc(viewed.weekLabel) + '</div>' +
+    (viewed.isActive ? '<span class="badge status-confirmed">Live week</span>' : '') + '</div><button class="ghost-btn" data-action="week-next">Next ›</button></div>';
+
+  var openNow = C.entries.filter(function(e){ return !e.out; });
+  out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">Clocked in now</h2>' + (openNow.length ? openNow.map(function(e){
+    var s = staffById(e.staffId);
+    return '<div class="avail-summary-row"><div class="avail-name">' + esc(s ? s.name : '?') + '</div><div style="font-size:0.84rem;">since ' + esc(fmtClock(e['in'])) + (e.date !== todayISO() ? ' on ' + esc(fmtDateDisplay(e.date)) : '') +
+      ' · <span data-since="' + esc(e['in']) + '">' + fmtDur(Date.now() - new Date(e['in'])) + '</span></div><button class="icon-btn" data-action="ts-edit" data-id="' + e.id + '">Edit</button></div>';
+  }).join('') : '<p class="section-sub" style="margin:0;">Nobody is clocked in.</p>') + '</div>';
+
+  if(!S.store) out += '<div class="card" style="border-color:var(--status-pending);"><b>Set the store location</b> (in Clock-in settings below) so staff can only clock in at the store.</div>';
+
+  var ts = timesheetData(viewed.key);
+  var team = {weekday:0, sat:0, sun:0};
+  out += '<div class="card"><div style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; align-items:center;"><h2 class="section-title" style="font-size:0.9rem; margin:0;">Hours this week</h2>' +
+    '<button class="ghost-btn" data-action="ts-add">+ Add entry</button></div>';
+  if(!ts.people.length) out += '<p class="section-sub" style="margin:8px 0 0;">No shifts or clock-ins this week.</p>';
+  ts.people.forEach(function(p){
+    team.weekday += p.tot.weekday; team.sat += p.tot.sat; team.sun += p.tot.sun;
+    out += '<div style="margin-top:14px;"><div style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;"><strong>' + esc(p.staff.name) + '</strong>' +
+      '<span style="font-size:0.8rem;">Weekday <b>' + fmtHrs(p.tot.weekday) + '</b> · Sat <b>' + fmtHrs(p.tot.sat) + '</b> · Sun <b>' + fmtHrs(p.tot.sun) + '</b> · Total <b>' + fmtHrs(p.total) + '</b></span></div>' +
+      '<div class="scrollx"><table class="ts-table"><tr><th>Day</th><th>Rostered</th><th>Clocked</th><th>Hours</th><th></th></tr>';
+    p.rows.forEach(function(r){
+      var ros = r.shift ? fmtTime(r.shift.start) + '–' + fmtTime(r.shift.end) : '–';
+      if(!r.entries.length){
+        out += '<tr><td>' + esc(r.day.label + ' ' + r.day.date) + '</td><td class="mono">' + ros + '</td><td>' + (r.missed ? '<span class="flag">No clock-in</span>' : '<span style="color:var(--muted);">–</span>') + '</td><td></td>' +
+          '<td><button class="icon-btn" data-action="ts-add" data-staff="' + p.staff.id + '" data-date="' + r.day.iso + '">Add</button></td></tr>';
+      }
+      r.entries.forEach(function(e, i){
+        out += '<tr><td>' + (i ? '' : esc(r.day.label + ' ' + r.day.date)) + '</td><td class="mono">' + (i ? '' : ros) + '</td>' +
+          '<td class="mono">' + esc(fmtClock(e['in'])) + '–' + (e.out ? esc(fmtClock(e.out)) : '…') + (e.breakMins ? ' <span style="color:var(--muted);">(−' + e.breakMins + 'm)</span>' : '') +
+          '<div>' + entryFlags(e, r.shift, r.radius).map(function(f){ return '<span class="flag ' + f[1] + '">' + esc(f[0]) + '</span>'; }).join('') + '</div></td>' +
+          '<td class="mono"><b>' + (e.out ? fmtHrs(entryHours(e)) : '') + '</b></td><td><button class="icon-btn" data-action="ts-edit" data-id="' + e.id + '">Edit</button></td></tr>';
+      });
+    });
+    out += '</table></div></div>';
+  });
+  if(ts.people.length) out += '<p style="margin:14px 0 0; font-size:0.85rem;">Team: Weekday <b>' + fmtHrs(team.weekday) + '</b> · Sat <b>' + fmtHrs(team.sat) + '</b> · Sun <b>' + fmtHrs(team.sun) + '</b> · Total <b>' + fmtHrs(team.weekday + team.sat + team.sun) + '</b></p>';
+  out += '</div>';
+
+  out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">Export for Xero</h2>' +
+    '<p class="section-sub">The Xero timesheet file has one row per person and earnings rate, with hours per day, the same layout as Xero\'s timesheet screen (Payroll → Timesheets). Copy the numbers across, then approve the timesheets in Xero.</p>' +
+    '<div style="display:flex; gap:8px; flex-wrap:wrap;"><button class="btn btn-primary" data-action="ts-download-xero">⬇ Xero timesheet (CSV)</button>' +
+    '<button class="btn btn-secondary" data-action="ts-download-log">⬇ Detailed clock log (CSV)</button>' +
+    '<button class="btn btn-secondary" data-action="ts-save-sheet">Save to Google Sheet</button></div>' +
+    (C.saved && C.saved[viewed.key] ? '<p class="dash-meta">Saved automatically ' + esc(fmtStamp(C.saved[viewed.key])) + '.</p>' : '') + '</div>';
+
+  // settings
+  var noEmail = STATE.staff.filter(function(s){ return !s.email; }).map(function(s){ return s.name; });
+  var st = S.store;
+  out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">Clock-in settings</h2>' +
+    '<label class="field-label" style="margin-top:0;">Store location</label>' +
+    '<p class="section-sub" style="margin:0 0 6px;">' + (st ? 'Set (' + st.lat.toFixed(5) + ', ' + st.lng.toFixed(5) + '). Staff must be within the distance below to clock in.' : 'Not set yet: staff can clock in from anywhere.') + '</p>' +
+    '<div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;"><button class="btn btn-secondary" data-action="ts-use-location">📍 Use my current location (be at the store)</button>' +
+    '<input type="text" id="tsStore" placeholder="or paste: -33.86880, 151.20930" style="flex:1 1 200px;" value="' + (st ? st.lat.toFixed(6) + ', ' + st.lng.toFixed(6) : '') + '"></div>' +
+    '<label class="field-label">Allowed distance from the store</label><select class="inline-select" id="tsRadius">' +
+      [100, 200, 300, 500].map(function(r){ return '<option value="' + r + '"' + ((Number(S.radius) || 200) === r ? ' selected' : '') + '>' + r + ' m</option>'; }).join('') + '</select>' +
+    '<label class="field-label">Email reminders</label>' +
+    '<label style="display:flex; gap:8px; align-items:center; font-size:0.86rem;"><input type="checkbox" id="tsRemIn" style="width:auto;"' + (S.remindIn !== false ? ' checked' : '') + '> Remind staff to clock in, ' +
+      '<select class="inline-select" id="tsRemBefore" style="width:auto;">' + [5, 10, 15, 30].map(function(m){ return '<option value="' + m + '"' + ((Number(S.remindBefore) || 10) === m ? ' selected' : '') + '>' + m + ' min</option>'; }).join('') + '</select> before their shift</label>' +
+    '<label style="display:flex; gap:8px; align-items:center; font-size:0.86rem; margin-top:6px;"><input type="checkbox" id="tsRemOut" style="width:auto;"' + (S.remindOut !== false ? ' checked' : '') + '> Remind staff who forget to clock out (15 min after their shift ends)</label>' +
+    '<label style="display:flex; gap:8px; align-items:center; font-size:0.86rem; margin-top:6px;"><input type="checkbox" id="tsWeekly" style="width:auto;"' + (S.weeklyEmail !== false ? ' checked' : '') + '> Email me last week\'s timesheet every Monday (to the Email alerts addresses)</label>' +
+    (noEmail.length ? '<p class="section-sub" style="margin:8px 0 0; color:var(--status-pending);">No email address yet for: ' + esc(noEmail.join(', ')) + '. Add them in Admin → Staff so they get reminders.</p>' : '') +
+    '<div style="margin-top:12px;"><button class="btn btn-primary" data-action="ts-settings-save">Save settings</button></div></div>';
+  return out;
+}
+function tsEntryFormHTML(e, staffId, date){
+  var isNew = !e;
+  var inHM = e ? isoToHM(e['in']) : '09:00', outHM = e && e.out ? isoToHM(e.out) : (isNew ? '13:00' : '');
+  return '<h2 class="section-title" style="font-size:0.95rem;">' + (isNew ? 'Add a clock entry' : 'Edit clock entry') + '</h2>' +
+    '<label class="field-label">Staff</label><select class="inline-select" id="teStaff"' + (isNew ? '' : ' disabled') + '>' +
+      STATE.staff.map(function(s){ return '<option value="' + s.id + '"' + ((e ? e.staffId : staffId) === s.id ? ' selected' : '') + '>' + esc(s.name) + '</option>'; }).join('') + '</select>' +
+    '<label class="field-label">Date</label><input type="date" id="teDate" value="' + esc(e ? e.date : (date || todayISO())) + '">' +
+    '<div style="display:flex; gap:10px;"><div style="flex:1;"><label class="field-label">Clock in</label><input type="time" id="teIn" value="' + inHM + '"></div>' +
+    '<div style="flex:1;"><label class="field-label">Clock out</label><input type="time" id="teOut" value="' + outHM + '"></div></div>' +
+    '<label class="field-label">Unpaid break (minutes)</label><input type="number" id="teBreak" min="0" max="240" step="5" value="' + (e ? (e.breakMins || 0) : 0) + '">' +
+    '<label class="field-label">Note (optional)</label><input type="text" id="teNote" maxlength="200" value="' + esc(e ? (e.note || '') : '') + '" placeholder="e.g. forgot to clock out, left 1:05pm">' +
+    '<div class="detail-actions"><button class="btn btn-primary" data-action="ts-save-entry" data-id="' + (e ? e.id : '') + '">Save</button>' +
+    (e ? '<button class="btn btn-danger" data-action="ts-del-entry" data-id="' + e.id + '">Delete</button>' : '') +
+    '<button class="btn btn-secondary" data-action="close-detail">Cancel</button></div>';
+}
+
 // ---------- dashboard ----------
 // Staff see: a note from the manager, tasks to tick off, today's store
 // checklists (when they're rostered on), handover notes and their own notes.
@@ -803,7 +1043,11 @@ function myDashView(){
   if(!ui.me) return null;
   if(ui.mgrUnlocked && STATE.dash){
     var d = STATE.dash;
-    return {note: d.notes[ui.me] || {}, tasks: d.tasks.filter(function(x){ return x.staffId===ui.me; }), checklists: d.checklists, checks: d.checks, handovers: d.handovers};
+    var C = STATE.clock || {entries:[], settings:{}};
+    var clk = {open: C.entries.filter(function(e){ return e.staffId===ui.me && !e.out; })[0] || null,
+      recent: C.entries.filter(function(e){ return e.staffId===ui.me && e.date >= addDaysISO(todayISO(), -14); }),
+      storeSet: !!(C.settings.store && typeof C.settings.store.lat === 'number'), radius: Number(C.settings.radius) || 200};
+    return {note: d.notes[ui.me] || {}, tasks: d.tasks.filter(function(x){ return x.staffId===ui.me; }), checklists: d.checklists, checks: d.checks, handovers: d.handovers, clock: clk};
   }
   return ui.myDash;
 }
@@ -881,6 +1125,7 @@ function renderDashboard(){
       out += '<div class="empty">Loading your dashboard…</div>';
     } else {
       var note = d.note || {};
+      out += clockCardHTML(d.clock);
       // Shifts still waiting on them live in My Shifts; point there.
       var toAccept = STATE.shifts.filter(function(s){ return s.staffId===ui.me && s.status==='pending'; }).length;
       if(toAccept) out += '<div class="card" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; border-color:var(--status-pending);"><span style="flex:1 1 auto; font-size:0.9rem;"><b>' + toAccept + ' shift' + (toAccept===1 ? '' : 's') + '</b> waiting for you to accept.</span><button class="btn btn-primary" data-action="tab" data-tab="my">Go to My Shifts</button></div>';
@@ -1664,11 +1909,12 @@ var TABS = [
   {key:'avail', label:'Availability'},
   {key:'roles', label:'Roles'},
   {key:'mgr', label:'Admin'},
-  {key:'budget', label:'Budget'}
+  {key:'budget', label:'Budget'},
+  {key:'times', label:'Timesheets'}
 ];
 function renderTabs(){
   var pendingCount = ui.mgrUnlocked ? pendingEditRequests().length : 0;
-  return '<nav class="tabs">' + TABS.filter(function(t){ return t.key!=='budget' || ui.mgrUnlocked; }).map(function(t){
+  return '<nav class="tabs">' + TABS.filter(function(t){ return (t.key!=='budget' && t.key!=='times') || ui.mgrUnlocked; }).map(function(t){
     var label = esc(t.label);
     if(t.key==='mgr' && pendingCount) label += '<span class="tab-badge">' + pendingCount + '</span>';
     if(t.key==='dash'){ var md = myDashView(); var openT = md ? md.tasks.filter(function(x){ return !x.done; }).length : 0; if(openT) label += '<span class="tab-badge">' + openT + '</span>'; }
@@ -1684,6 +1930,7 @@ function renderTabContent(){
   if(ui.tab==='roles') return renderRoles();
   if(ui.tab==='mgr') return renderManager();
   if(ui.tab==='budget') return renderBudget();
+  if(ui.tab==='times') return ui.mgrUnlocked ? renderTimesheets() : renderAdminPinGate('Enter the Admin PIN to see timesheets.');
   return '';
 }
 
@@ -2635,6 +2882,83 @@ function onClick(e){
     if(msgStaff) document.getElementById('detailBox').innerHTML = notifyPanelHTML(ctxMsg, msgStaff, msgShift);
     return;
   }
+  // ---- clock in / out ----
+  if(action==='clock-in' || action==='clock-out'){
+    if(!ui.me || !ui.myPin){ toast('Log in with your name and PIN first.'); return; }
+    doClock(action); return;
+  }
+  if(action==='ts-edit' || action==='ts-add'){
+    var teE = action==='ts-edit' ? ((STATE.clock || {}).entries || []).find(function(x){ return x.id===el.getAttribute('data-id'); }) : null;
+    document.getElementById('detailBox').innerHTML = tsEntryFormHTML(teE, el.getAttribute('data-staff'), el.getAttribute('data-date'));
+    document.getElementById('detailOverlay').classList.add('show');
+    return;
+  }
+  if(action==='ts-save-entry'){
+    var teId = el.getAttribute('data-id'), teStaff = document.getElementById('teStaff').value, teDate = document.getElementById('teDate').value;
+    var teIn = document.getElementById('teIn').value, teOut = document.getElementById('teOut').value;
+    var teBreak = Math.max(0, Math.min(240, parseInt(document.getElementById('teBreak').value, 10) || 0)), teNote = document.getElementById('teNote').value.trim().slice(0, 200);
+    if(!teDate || !teIn){ toast('Set the date and clock-in time.'); return; }
+    var inIso = new Date(teDate + 'T' + teIn + ':00').toISOString();
+    var outIso = '';
+    if(teOut){ var od = new Date(teDate + 'T' + teOut + ':00'); if(teOut <= teIn) od.setDate(od.getDate() + 1); outIso = od.toISOString(); }
+    hideDetail();
+    adminCommit(function(){
+      STATE.clock = STATE.clock || {entries:[], settings:{}, sent:{}, saved:{}};
+      var C = STATE.clock; C.entries = C.entries || [];
+      var ex = teId ? C.entries.find(function(x){ return x.id===teId; }) : null;
+      var stamp = {by:'admin', at:new Date().toISOString()};
+      if(ex){ ex.date = teDate; ex['in'] = inIso; ex.out = outIso; ex.breakMins = teBreak; ex.note = teNote; ex.edited = stamp; }
+      else {
+        var shT = shiftOnDate(teStaff, teDate);
+        C.entries.push({id: dashId('ck'), staffId: teStaff, date: teDate, 'in': inIso, out: outIso, shiftId: shT ? shT.id : '', inDist: null, breakMins: teBreak, note: teNote, edited: stamp});
+      }
+    }, 'Clock entry saved.');
+    return;
+  }
+  if(action==='ts-del-entry'){
+    var tdel = el.getAttribute('data-id');
+    hideDetail();
+    showConfirm('Delete this clock entry?', function(){
+      adminCommit(function(){ var C = STATE.clock || {entries:[]}; C.entries = (C.entries || []).filter(function(x){ return x.id !== tdel; }); }, 'Clock entry deleted.');
+    });
+    return;
+  }
+  if(action==='ts-use-location'){
+    el.disabled = true; el.textContent = 'Getting location…';
+    getLocation().then(function(loc){
+      document.getElementById('tsStore').value = loc.lat.toFixed(6) + ', ' + loc.lng.toFixed(6);
+      toast('Location found (accurate to about ' + loc.acc + ' m). Tap Save settings.');
+      el.disabled = false; el.textContent = '📍 Use my current location (be at the store)';
+    }, function(err){ toast(err.message); el.disabled = false; el.textContent = '📍 Use my current location (be at the store)'; });
+    return;
+  }
+  if(action==='ts-settings-save'){
+    var stTxt = document.getElementById('tsStore').value.trim(), store = null;
+    if(stTxt){
+      var m = stTxt.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
+      if(!m || Math.abs(+m[1]) > 90 || Math.abs(+m[2]) > 180){ toast('The store location should look like: -33.86880, 151.20930'); return; }
+      store = {lat: +m[1], lng: +m[2]};
+    }
+    var newS = {store: store, radius: Number(document.getElementById('tsRadius').value) || 200,
+      remindIn: document.getElementById('tsRemIn').checked, remindBefore: Number(document.getElementById('tsRemBefore').value) || 10,
+      remindOut: document.getElementById('tsRemOut').checked, weeklyEmail: document.getElementById('tsWeekly').checked,
+      tz: (Intl.DateTimeFormat().resolvedOptions().timeZone || '')};
+    adminCommit(function(){ STATE.clock = STATE.clock || {entries:[], sent:{}, saved:{}}; STATE.clock.settings = newS; }, 'Clock-in settings saved.');
+    return;
+  }
+  if(action==='ts-download-xero' || action==='ts-download-log'){
+    var vk = resolveViewedWeek();
+    var nameBase = (action==='ts-download-xero' ? 'Xero timesheet ' : 'Clock log ') + vk.weekLabel.replace(/[\\/:*?"<>|]/g, '');
+    downloadText(nameBase + '.csv', action==='ts-download-xero' ? xeroCsv(vk.key) : logCsv(vk.key), 'text/csv');
+    var openCount = weekEntries(vk.key).filter(function(e){ return !e.out; }).length;
+    toast(openCount ? 'Downloaded. Note: ' + openCount + ' entr' + (openCount===1 ? 'y has' : 'ies have') + ' no clock-out and count as 0 hours.' : 'Downloaded.');
+    return;
+  }
+  if(action==='ts-save-sheet'){
+    var vs = resolveViewedWeek();
+    server('saveTimesheetNow', [ui.adminPin, vs.key]).then(function(res){ toast((res && res.message) || 'Saved.'); }, function(err){ toast(failMsg(err)); });
+    return;
+  }
   // ---- dashboard (staff) ----
   if(action==='dash-task' || action==='dash-check' || action==='dash-ho-add' || action==='dash-ho-remove' || action==='dash-mine-save'){
     if(!ui.me || !ui.myPin){ toast('Log in with your name and PIN first.'); return; }
@@ -2858,7 +3182,7 @@ function onClick(e){
   }
   if(action==='lock-mgr'){
     lockAdmin();
-    if(ui.tab==='budget') persistTab('my');
+    if(ui.tab==='budget' || ui.tab==='times') persistTab('my');
     // Drop the admin-only details (PINs, pay rates, contacts) from this screen.
     server('getState', []).then(applyServer, function(){});
     render();
