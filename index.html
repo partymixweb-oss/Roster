@@ -311,6 +311,9 @@
   .cell-empty{background:transparent; border:1.5px dashed var(--border); color:var(--accent); font-weight:800; min-width:36px; min-height:28px; display:inline-flex; align-items:center; justify-content:center; border-radius:10px;}
   .cell-empty:hover{border-color:var(--accent); color:var(--accent-strong); background:var(--accent-soft);}
   /* Unpublished grid edits */
+  .cell-empty.cell-off{border-color:var(--status-open); color:var(--status-open); background:var(--status-open-soft); font-size:0.66rem;}
+  .cell-empty.cell-limited{flex-direction:column; gap:0; line-height:1.1;}
+  .cell-avail{font-size:0.56rem; font-weight:700; color:var(--status-pending);}
   .cell-shift.ed-new, .cell-shift.ed-changed{outline:2px dashed var(--accent); outline-offset:1px;}
   .cell-shift.ed-removed{border:1.5px dashed var(--status-open); color:var(--status-open); font-size:0.66rem; font-weight:700;}
   .cell-shift.paint-target{outline:3px solid var(--accent); outline-offset:1px; background:var(--accent-soft) !important; color:var(--ink) !important;}
@@ -834,9 +837,10 @@ function brushFrom(weekKey, staffId, dayKey){
 function pasteInto(targets){
   if(!ui.brush || !targets.length) return 0;
   pushHistory();
-  var n = 0;
+  var n = 0; ui.lastSkipped = 0;
   targets.forEach(function(c){
     if(c.week===ui.brush.week && c.staff===ui.brush.staffId && c.day===ui.brush.day) return;
+    if(blockedDay(c.staff, c.week, c.day)){ ui.lastSkipped++; return; }
     if(putShift(c.week, c.staff, c.day, ui.brush.start, ui.brush.end, pasteRole(ui.brush, c.staff))) n++;
   });
   pruneEdits();
@@ -856,14 +860,16 @@ function commonTimes(weekKey){
 function copyLastWeekPlan(weekKey){
   var srcKey = addDaysISO(weekKey, -7);
   var src = gridShifts(srcKey), cur = gridShifts(weekKey);
-  var add = [];
+  var add = [], blocked = [];
   src.forEach(function(s){
     var who = s.staffId || s.originalStaffId;
     if(!who || !staffByIdRaw(who)) return;
     if(findCell(cur, who, s.day) || add.some(function(a){ return a.staffId===who && a.day===s.day; })) return;
+    var bd = blockedDay(who, weekKey, s.day);
+    if(bd){ blocked.push({staffId:who, day:s.day, reason:bd.reason}); return; }
     add.push({staffId:who, day:s.day, start:s.start, end:s.end, role:shiftRole(s)});
   });
-  return {srcKey:srcKey, add:add};
+  return {srcKey:srcKey, add:add, blocked:blocked};
 }
 function publishEdits(){
   pruneEdits();
@@ -912,7 +918,7 @@ function cellViewHTML(ctx, shift){
   var assignee = shift.staffId ? staffById(shift.staffId) : null;
   var original = shift.originalStaffId ? staffById(shift.originalStaffId) : null;
   var isActiveWeek = ctx.weekKey === weekStartKey();
-  var conflict = isActiveWeek ? availabilityConflict(shift) : null;
+  var conflict = availabilityConflict(shift, ctx.weekKey);
   var html = '<div class="detail-row"><span class="k">Day</span><span>' + day.label + ' ' + day.date + '</span></div>' +
     '<div class="detail-row"><span class="k">Time</span><span class="mono">' + fmtTime(shift.start) + ' – ' + fmtTime(shift.end) + '</span></div>' +
     '<div class="detail-row"><span class="k">Status</span><span class="badge ' + st.cls + '">' + st.label + '</span></div>' +
@@ -925,6 +931,14 @@ function cellViewHTML(ctx, shift){
       '<button class="btn btn-danger" data-action="detail-release" data-shift="' + shift.id + '">Can\'t do it</button>';
   } else if(isActiveWeek && ui.me && shift.staffId===ui.me && shift.status==='confirmed'){
     actions += '<button class="btn btn-secondary" data-action="detail-release" data-shift="' + shift.id + '">Release this shift</button>';
+  }
+  if(isActiveWeek && ui.me && shift.staffId===ui.me && (shift.status==='pending' || shift.status==='confirmed')){
+    actions += editRequestActionsHTML(shift);
+  }
+  if(ui.mgrUnlocked && isActiveWeek && shift.editRequest && shift.editRequest.status==='pending'){
+    html += '<div class="detail-row" style="color:var(--status-pending); font-weight:700;">✎ Asked to change to ' + fmtTime(shift.editRequest.start) + '–' + fmtTime(shift.editRequest.end) + (shift.editRequest.note ? ' — "' + esc(shift.editRequest.note) + '"' : '') + '</div>';
+    actions += '<button class="btn btn-primary" data-action="approve-edit-request" data-shift="' + shift.id + '">Approve change</button>' +
+      '<button class="btn btn-danger" data-action="reject-edit-request" data-shift="' + shift.id + '">Decline change</button>';
   } else if(isActiveWeek && shift.status==='open'){
     if(ui.me && canClaim(shift)) actions += '<button class="btn btn-primary" data-action="detail-claim" data-shift="' + shift.id + '">Claim this shift</button>';
     else if(ui.me) actions += '<p class="section-sub" style="margin:0;">🔒 ' + esc(claimOnlyLabel(shift)) + ' can pick up this shift.</p>';
@@ -943,8 +957,10 @@ function cellEditFormHTML(ctx, shift){
   var day = weekDaysFor(ctx.weekKey).find(function(d){ return d.key===ctx.dayKey; });
   var staff = staffById(ctx.staffId);
   var roleVal = shift ? shiftRole(shift) : ((staff && staff.role) || ROLE_ORDER[0]);
+  var ds = dayStatus(ctx.staffId, ctx.weekKey, ctx.dayKey);
   return '<div class="detail-row"><span class="k">For</span><span>' + esc(staff ? staff.name : '') + '</span></div>' +
     '<div class="detail-row"><span class="k">Day</span><span>' + day.label + ' ' + day.date + '</span></div>' +
+    (ds ? '<div class="detail-row" style="color:' + (ds.kind==='limited' ? 'var(--status-pending)' : 'var(--status-open)') + '; font-weight:700;">⚠ ' + esc((staff ? staff.name + ': ' : '') + ds.reason) + '</div>' : '') +
     '<label class="field-label" style="margin-top:10px;">' + (shift ? 'Quick times' : 'Quick add: tap a time') + '</label>' +
     '<div class="time-chips">' + commonTimes(ctx.weekKey).map(function(c){
       return '<button type="button" class="time-chip" data-action="' + (shift ? 'cell-chip-fill' : 'cell-chip-add') + '" data-start="' + c.start + '" data-end="' + c.end + '">' + fmtTime(c.start) + '–' + fmtTime(c.end) + '</button>';
@@ -1305,42 +1321,65 @@ function renderRoles(){
 // member has said about that day, or {level, reason} if it does.
 // level 'blocked' = marked fully unavailable; 'partial' = outside the
 // hours they said they're limited to.
-function availabilityConflict(shift){
-  if(!shift.staffId) return null;
-  var rec = STATE.availability[shift.staffId];
-  if(!rec) return null;
-  var day = rec.days[shift.day];
-  if(!day || day.status==='available') return null;
-  if(day.status==='unavailable'){
-    return {level:'blocked', reason:'Marked themselves unavailable this day'};
+// What a person has said about one day of a given week: time off on that
+// date first, then their usual weekly availability (set once, every week).
+function timeOffOn(staffId, iso){
+  return (STATE.timeOff || []).find(function(t){ return t.staffId===staffId && t.start <= iso && t.end >= iso; }) || null;
+}
+function dayStatus(staffId, weekKey, dayKey){
+  var d = weekDaysFor(weekKey || weekStartKey()).find(function(x){ return x.key===dayKey; });
+  if(d){
+    var off = timeOffOn(staffId, d.iso);
+    if(off) return {kind:'timeoff', entry:off, short:'Off',
+      reason:'Time off ' + fmtDateDisplay(off.start) + (off.end!==off.start ? ' – ' + fmtDateDisplay(off.end) : '') + (off.note ? ' (' + off.note + ')' : '')};
   }
-  if(day.status==='limited'){
+  var rec = STATE.availability[staffId];
+  var day = rec && rec.days && rec.days[dayKey];
+  var dayName = ({mon:'Monday', tue:'Tuesday', wed:'Wednesday', thu:'Thursday', fri:'Friday', sat:'Saturday', sun:'Sunday'})[dayKey] || dayKey;
+  if(day && day.status==='unavailable') return {kind:'unavailable', short:'N/A', reason:'Not available on ' + dayName + 's'};
+  if(day && day.status==='limited'){
     var from = day.from || '00:00', to = day.to || '23:59';
-    if(shift.start < from || shift.end > to){
-      return {level:'partial', reason:'Said they\'re only free ' + fmtTime(from) + '–' + fmtTime(to) + ' this day'};
-    }
+    return {kind:'limited', from:from, to:to, short:fmtTime(from) + '–' + fmtTime(to), reason:'Only free ' + fmtTime(from) + '–' + fmtTime(to) + ' on ' + dayName + 's'};
   }
   return null;
 }
+function availabilityConflict(shift, weekKey){
+  if(!shift.staffId) return null;
+  var ds = dayStatus(shift.staffId, weekKey, shift.day);
+  if(!ds) return null;
+  if(ds.kind==='timeoff') return {level:'blocked', kind:'timeoff', reason:ds.reason};
+  if(ds.kind==='unavailable') return {level:'blocked', kind:'unavailable', reason:ds.reason};
+  if(shift.start < ds.from || shift.end > ds.to) return {level:'partial', kind:'limited', reason:ds.reason};
+  return null;
+}
+// Squares where copying/pasting a shift should be skipped automatically.
+function blockedDay(staffId, weekKey, dayKey){
+  var ds = dayStatus(staffId, weekKey, dayKey);
+  return ds && (ds.kind==='timeoff' || ds.kind==='unavailable') ? ds : null;
+}
 function conflictBadgeHTML(conflict){
   if(!conflict) return '';
-  return '<span class="badge status-open" title="' + esc(conflict.reason) + '">⚠ ' + (conflict.level==='blocked' ? 'Availability conflict' : 'Outside stated hours') + '</span>';
+  return '<span class="badge status-open" title="' + esc(conflict.reason) + '">⚠ ' + (conflict.kind==='timeoff' ? 'On time off' : conflict.level==='blocked' ? 'Availability conflict' : 'Outside stated hours') + '</span>';
 }
 function renderConflictsOverview(){
   var rows = [];
-  STATE.shifts.forEach(function(s){
-    if(s.status==='open') return;
-    var c = availabilityConflict(s);
-    if(c) rows.push({shift:s, conflict:c});
+  var live = weekStartKey();
+  [live].concat(Object.keys(STATE.weeks || {}).filter(function(k){ return k > live; }).sort()).forEach(function(wk){
+    weekShiftsReadOnly(wk).forEach(function(s){
+      if(s.status==='open') return;
+      var c = availabilityConflict(s, wk);
+      if(c) rows.push({shift:s, conflict:c, week:wk});
+    });
   });
   if(!rows.length){
     return '<div class="empty" style="margin-top:14px;">No conflicts — every allocated shift matches what people said they\'re available for.</div>';
   }
-  rows.sort(function(a,b){ return dayIndex(a.shift.day) - dayIndex(b.shift.day); });
+  var dayIso = function(r){ var d = weekDaysFor(r.week).find(function(x){ return x.key===r.shift.day; }); return d ? d.iso : r.week; };
+  rows.sort(function(a,b){ return dayIso(a) < dayIso(b) ? -1 : dayIso(a) > dayIso(b) ? 1 : 0; });
   var out = '<div class="card" style="margin-top:14px; border-color:var(--status-open);">' +
-    '<h2 class="section-title" style="font-size:0.9rem; color:var(--status-open);">⚠ ' + rows.length + ' shift' + (rows.length===1?'':'s') + ' conflict' + (rows.length===1?'s':'') + ' with stated availability</h2>';
+    '<h2 class="section-title" style="font-size:0.9rem; color:var(--status-open);">⚠ ' + rows.length + ' shift' + (rows.length===1?'':'s') + ' clash' + (rows.length===1?'es':'') + ' with time off or availability</h2>';
   rows.forEach(function(r){
-    var s = r.shift; var staff = staffById(s.staffId); var day = dayByKey(s.day);
+    var s = r.shift; var staff = staffById(s.staffId); var day = weekDaysFor(r.week).find(function(x){ return x.key===s.day; });
     out += '<div class="avail-summary-row"><div style="flex:1 1 auto;">' +
       '<div style="font-weight:700; font-size:0.85rem;">' + esc(staff ? staff.name : 'Unknown') + ' · ' + day.label + ' ' + day.date + '</div>' +
       '<div style="font-size:0.8rem; color:var(--ink-soft); margin-top:2px;" class="mono">' + fmtTime(s.start) + ' – ' + fmtTime(s.end) + '</div>' +
@@ -1507,6 +1546,7 @@ function renderFullWeek(){
     '<span><span class="dot" style="background:var(--status-pending);"></span>Awaiting response</span>' +
     '<span><span class="dot" style="background:var(--status-confirmed);"></span>Confirmed</span>' +
     '<span><span class="dot" style="background:var(--status-open);"></span>Open — needs coverage</span>' +
+    (isAdmin ? '<span>⚠ clashes with time off or availability</span><span><b style="color:var(--status-open);">Off</b> time off · <b style="color:var(--status-open);">N/A</b> not available</span><span>✎ change requested</span>' : '') +
   '</div>';
 
   if(isAdmin){
@@ -1538,18 +1578,25 @@ function renderFullWeek(){
       var isBrush = ui.copyMode && ui.brush && ui.brush.week===viewed.key && ui.brush.staffId===s.id && ui.brush.day===d.key;
       if(isBrush) edCls += ' brush-src';
       if(sh){
-        var cellConflict = viewed.isActive ? availabilityConflict(sh) : null;
+        var cellConflict = availabilityConflict(sh, viewed.key);
+        var hasReq = isAdmin && viewed.isActive && sh.editRequest && sh.editRequest.status==='pending';
         var csty = cellStatusStyle(sh.status);
         var cellBorder = cellConflict ? 'box-shadow:inset 0 0 0 2px var(--status-open);' : '';
-        var titleText = statusInfo(sh).label + (cellConflict ? ' — ' + cellConflict.reason : '');
+        var titleText = statusInfo(sh).label + (cellConflict ? ' — ' + cellConflict.reason : '') +
+          (isAdmin && viewed.isActive && sh.editRequest && sh.editRequest.status==='pending' ? ' — asked to change to ' + fmtTime(sh.editRequest.start) + '–' + fmtTime(sh.editRequest.end) : '');
         rows += '<td><span class="cell-shift clickable' + edCls + '" data-filled="1" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" style="background:' + csty.bg + '; color:' + csty.fg + ';' + cellBorder + '" title="' + esc(titleText + (edState ? ' (not published yet)' : '')) + '">' +
-          '<span class="cell-time mono">' + (cellConflict ? '⚠ ' : '') + fmtTime(sh.start) + '–' + fmtTime(sh.end) + '</span>' +
+          '<span class="cell-time mono">' + (cellConflict ? '⚠ ' : '') + (hasReq ? '✎ ' : '') + fmtTime(sh.start) + '–' + fmtTime(sh.end) + '</span>' +
           '<span class="cell-role">' + esc(roleLabel(shiftRole(sh))) + '</span>' +
         '</span></td>';
       } else if(isAdmin){
         rows += edState === 'removed'
           ? '<td><span class="cell-shift clickable ed-removed" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="Removed (not published yet)">removed</span></td>'
-          : '<td><span class="cell-shift clickable cell-empty" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="Add a shift for ' + esc(s.name) + '">+</span></td>';
+          : (function(){
+              var ds = dayStatus(s.id, viewed.key, d.key);
+              var cls = ds ? (ds.kind==='limited' ? ' cell-limited' : ' cell-off') : '';
+              var inner = ds ? (ds.kind==='limited' ? '+<span class="cell-avail">' + esc(ds.short) + '</span>' : esc(ds.short)) : '+';
+              return '<td><span class="cell-shift clickable cell-empty' + cls + '" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="' + esc(ds ? s.name + ': ' + ds.reason : 'Add a shift for ' + s.name) + '">' + inner + '</span></td>';
+            })();
       } else {
         rows += '<td><span class="cell-dash">–</span></td>';
       }
@@ -1563,13 +1610,13 @@ function renderFullWeek(){
 
 var AVAIL_LABELS = {available:'Available', unavailable:'Not available', limited:'Limited'};
 function renderAvailability(){
-  var out = '<h2 class="section-title">Your availability</h2>' +
-    '<p class="section-sub">Let the team know which days you can work this week.</p>';
+  var out = '<h2 class="section-title">Your weekly availability</h2>' +
+    '<p class="section-sub">Set your usual Monday–Sunday once and save. It stays the same every week until you change it. For one-off dates, use <b>Time off</b> below.</p>';
   if(!ui.me){
     out += '<div class="empty">Select your name above to submit your availability.</div>';
   } else {
     var mineAvail = STATE.availability[ui.me] || { days:{}, note:'' };
-    out += '<div class="card"><fieldset>';
+    out += '<div class="card">' + (mineAvail.updatedAt ? '<p class="section-sub" style="margin:0 0 8px;">Last saved ' + esc(fmtDateDisplay(String(mineAvail.updatedAt).slice(0,10))) + '. Applies to every week.</p>' : '') + '<fieldset>';
     STATE.days.forEach(function(d){
       var rec = mineAvail.days[d.key] || {status:'available'};
       out += '<div class="avail-row" data-day="' + d.key + '">' +
@@ -1596,7 +1643,7 @@ function renderAvailability(){
     out += '</div>';
   }
 
-  out += '<h2 class="section-title" style="margin-top:22px;">Team availability this week</h2>';
+  out += '<h2 class="section-title" style="margin-top:22px;">Team\'s weekly availability</h2>';
   var ids = Object.keys(STATE.availability);
   if(!ids.length){
     out += '<div class="empty">No one has submitted their availability yet.</div>';
@@ -1619,8 +1666,8 @@ function renderAvailability(){
     out += '</div>';
   }
 
-  out += '<h2 class="section-title" style="margin-top:22px;">Future time off</h2>' +
-    '<p class="section-sub">Already know you\'ll be away on dates beyond this week? Add them here so they\'re on the radar when future weeks get rostered.</p>';
+  out += '<h2 class="section-title" style="margin-top:22px;">Time off</h2>' +
+    '<p class="section-sub">Away on particular dates (holiday, appointment)? Add them here. The admin sees them on the roster, and you won\'t be rostered on those days.</p>';
   if(!ui.me){
     out += '<div class="empty">Select your name above to add upcoming time off.</div>';
   } else {
@@ -1849,7 +1896,7 @@ function renderManager(){
 
   var suggestedStart = addDaysISO(STATE.days[0].iso, 7);
   out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">Start next week</h2>' +
-    '<p class="section-sub" style="margin-bottom:10px;">Rolls the dates forward, resets every shift to "awaiting response", and clears submitted availability. Shift times and who\'s assigned carry over as a starting point — adjust the ones that change above before you save.</p>' +
+    '<p class="section-sub" style="margin-bottom:10px;">Rolls the dates forward and resets every shift to "awaiting response". Everyone\'s weekly availability and time off stay as they are. Shift times and who\'s assigned carry over as a starting point — adjust the ones that change above before you save.</p>' +
     '<label class="field-label" style="margin-top:0;">Week starting</label>' +
     '<input type="date" id="nextWeekStart" value="' + suggestedStart + '">' +
     '<label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:0.82rem; color:var(--ink-soft);">' +
@@ -2102,6 +2149,7 @@ function onClick(e){
     return;
   }
   if(action==='approve-edit-request'){
+    hideDetail();
     var apprShift = STATE.shifts.find(function(x){ return x.id===el.getAttribute('data-shift'); });
     var apprId = el.getAttribute('data-shift');
     if(apprShift && apprShift.editRequest){
@@ -2116,6 +2164,7 @@ function onClick(e){
     return;
   }
   if(action==='reject-edit-request'){
+    hideDetail();
     var rejShift = STATE.shifts.find(function(x){ return x.id===el.getAttribute('data-shift'); });
     var rejId = el.getAttribute('data-shift');
     if(rejShift && rejShift.editRequest){
@@ -2192,10 +2241,12 @@ function onClick(e){
   if(action==='copy-last-week'){
     var viewedC = resolveViewedWeek();
     var plan = copyLastWeekPlan(viewedC.key);
-    if(!plan.add.length){ toast('Every shift from last week is already here.'); return; }
-    var skipped = gridShifts(plan.srcKey).length - plan.add.length;
+    if(!plan.add.length){ toast(plan.blocked.length ? 'Nothing to copy: the rest are on time off or not available.' : 'Every shift from last week is already here.'); return; }
+    var skipped = gridShifts(plan.srcKey).length - plan.add.length - plan.blocked.length;
+    var blockedNames = plan.blocked.map(function(b){ var st = staffById(b.staffId); return (st ? st.name : '?') + ' ' + (WEEKDAY_LABEL[b.day] || b.day).slice(0,3); });
     showConfirm('Copy ' + plan.add.length + ' shift' + (plan.add.length===1 ? '' : 's') + ' from ' + weekLabelFor(plan.srcKey) + ' into this week?' +
       (skipped > 0 ? ' ' + skipped + ' square' + (skipped===1 ? ' that already has' : 's that already have') + ' a shift stay as they are.' : '') +
+      (blockedNames.length ? ' Skipping ' + blockedNames.join(', ') + ' (time off or not available).' : '') +
       ' You can check them before publishing.', function(){
       pushHistory();
       plan.add.forEach(function(a){ putShift(viewedC.key, a.staffId, a.day, a.start, a.end, a.role); });
@@ -2374,14 +2425,13 @@ function onClick(e){
     return;
   }
   if(action==='reset-week'){
-    showConfirm('Reset all shifts to "awaiting response" and clear availability?', function(){
+    showConfirm('Reset all shifts to "awaiting response"? Everyone\'s weekly availability stays as it is.', function(){
       dropMgrDraft();
       adminCommit(function(){
         STATE.shifts.forEach(function(s){
           if(s.status==='open' && s.originalStaffId){ s.staffId = s.originalStaffId; }
           s.status = 'pending';
         });
-        STATE.availability = {};
       }, 'Week reset.');
     });
     return;
@@ -2391,8 +2441,8 @@ function onClick(e){
     if(!startVal){ toast('Pick the date this new week starts.'); return; }
     var clearAll = document.getElementById('clearShiftsOnRollover').checked;
     var msg = clearAll
-      ? 'Start the week of ' + startVal + ' with a blank slate? This clears all shifts and availability.'
-      : 'Start the week of ' + startVal + '? Shifts carry over as a template, reset to "awaiting response", and availability is cleared.';
+      ? 'Start the week of ' + startVal + ' with a blank slate? This clears all shifts. Everyone\'s weekly availability stays.'
+      : 'Start the week of ' + startVal + '? Shifts carry over as a template and reset to "awaiting response". Everyone\'s weekly availability stays.';
     showConfirm(msg, function(){
      dropMgrDraft();
      var weekBefore = STATE.days[0].iso;
@@ -2427,7 +2477,6 @@ function onClick(e){
           return {id:s.id, staffId:staffId, originalStaffId:s.originalStaffId, day:s.day, start:s.start, end:s.end, role:shiftRole(s), status:'pending'};
         });
       }
-      STATE.availability = {};
      }, 'New week started: ' + formatWeekLabel(buildDays(startVal)));
     });
     return;
@@ -2638,6 +2687,7 @@ function endDrag(cancelled){
   if(d.mouse){ ui.brush = null; ui.suppressClick = true; setTimeout(function(){ ui.suppressClick = false; }, 0); }
   render();
   if(n) toast('Pasted into ' + n + ' square' + (n===1 ? '' : 's') + '.');
+  if(ui.lastSkipped) toast('Skipped ' + ui.lastSkipped + ' (time off or not available).');
 }
 document.addEventListener('pointerup', function(){ endDrag(false); });
 document.addEventListener('pointercancel', function(){ endDrag(true); });
