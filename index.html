@@ -895,6 +895,127 @@ function rebaseEdits(){
   pruneEdits();
 }
 
+// ---------- printable PDF of a week (plain black-and-white table) ----------
+// A small built-in PDF writer (standard Helvetica, no downloads needed).
+// Text widths come from the browser's Arial metrics, which match Helvetica.
+var pdfMeasure = null;
+function pdfTextWidth(s, size, bold){
+  if(!pdfMeasure) pdfMeasure = document.createElement('canvas').getContext('2d');
+  pdfMeasure.font = (bold ? 'bold ' : '') + '100px Arial, Helvetica, sans-serif';
+  return pdfMeasure.measureText(s).width * size / 100;
+}
+function pdfFit(s, size, bold, maxW){
+  if(pdfTextWidth(s, size, bold) <= maxW) return s;
+  while(s.length > 1 && pdfTextWidth(s + '…', size, bold) > maxW) s = s.slice(0, -1);
+  return s + '…';
+}
+function pdfStr(s){
+  var map = {'–':'\x96', '—':'\x97', '‘':'\x91', '’':'\x92', '“':'\x93', '”':'\x94', '…':'\x85', '€':'\x80'};
+  var out = '';
+  for(var i = 0; i < s.length; i++){
+    var c = s.charAt(i);
+    if(map[c]) c = map[c];
+    else if(s.charCodeAt(i) > 255) c = '?';
+    if(c === '(' || c === ')' || c === '\\') c = '\\' + c;
+    out += c;
+  }
+  return '(' + out + ')';
+}
+function buildRosterPdf(weekKey){
+  var W = 842, H = 595, M = 28;                       // A4 landscape, points
+  var days = weekDaysFor(weekKey), shifts = weekShiftsReadOnly(weekKey);
+  var staff = STATE.staff.slice();
+  var nameW = 108, hoursW = 46, dayW = (W - 2*M - nameW - hoursW) / 7;
+  var headH = 30, rowH = 34;
+  var pages = [], ops = null, y = 0;
+  function text(s, x, yy, size, bold, align, maxW){
+    if(maxW) s = pdfFit(s, size, bold, maxW);
+    var w = pdfTextWidth(s, size, bold);
+    var tx = align === 'center' ? x - w/2 : align === 'right' ? x - w : x;
+    ops.push('BT /' + (bold ? 'F2' : 'F1') + ' ' + size + ' Tf ' + tx.toFixed(2) + ' ' + (H - yy).toFixed(2) + ' Td ' + pdfStr(s) + ' Tj ET');
+  }
+  function line(x1, y1, x2, y2, w){ ops.push(w + ' w ' + x1.toFixed(2) + ' ' + (H-y1).toFixed(2) + ' m ' + x2.toFixed(2) + ' ' + (H-y2).toFixed(2) + ' l S'); }
+  var colX = [M, M + nameW]; for(var i = 1; i <= 7; i++) colX.push(M + nameW + dayW*i); colX.push(W - M);
+  function newPage(){
+    ops = []; pages.push(ops);
+    text(STATE.title || 'Roster', M, M + 14, 16, true);
+    text('Week of ' + weekLabelFor(weekKey), M, M + 32, 11, false);
+    text('Printed ' + fmtDateDisplay(todayISO()), W - M, M + 14, 9, false, 'right');
+    y = M + 46;
+    line(M, y, W - M, y, 1);
+    text('Staff', M + 6, y + 13, 9, true);
+    days.forEach(function(d, i){
+      var cx = colX[i+1] + dayW/2;
+      text(d.label, cx, y + 12, 9, true, 'center');
+      text(d.date, cx, y + 24, 8, false, 'center');
+    });
+    text('Hours', W - M - 6, y + 13, 9, true, 'right');
+    y += headH; line(M, y, W - M, y, 1);
+  }
+  function finishGrid(top, bottom){
+    colX.forEach(function(x, i){ line(x, top, x, bottom, (i===0 || i===colX.length-1) ? 1 : 0.5); });
+  }
+  newPage();
+  var gridTop = M + 46;
+  staff.forEach(function(s){
+    if(y + rowH > H - M - 24){ finishGrid(gridTop, y); newPage(); gridTop = M + 46; }
+    var total = 0;
+    text(s.name, M + 6, y + rowH/2 + 3, 10, true, 'left', nameW - 10);
+    days.forEach(function(d, i){
+      var sh = findCell(shifts, s.id, d.key);
+      if(!sh) return;
+      var cx = colX[i+1] + dayW/2;
+      var isOpen = sh.status === 'open' && !sh.staffId;
+      if(!isOpen) total += shiftHours(sh);
+      text((isOpen ? 'OPEN ' : '') + fmtTime(sh.start) + '–' + fmtTime(sh.end), cx, y + 15, 9.5, true, 'center', dayW - 6);
+      text(roleLabel(shiftRole(sh)), cx, y + 26, 7, false, 'center', dayW - 6);
+    });
+    text(total ? (Math.round(total*100)/100) + 'h' : '', W - M - 6, y + rowH/2 + 3, 9.5, false, 'right');
+    y += rowH; line(M, y, W - M, y, 0.5);
+  });
+  finishGrid(gridTop, y);
+  var notes = weekKey === weekStartKey() ? (STATE.weekNotes || '').trim() : ((STATE.weeks[weekKey] || {}).weekNotes || '').trim();
+  if(notes && y + 30 < H - M){
+    text('Notice: ' + notes.replace(/\s+/g, ' '), M, y + 18, 9, false, 'left', W - 2*M);
+  }
+  pages.forEach(function(p, i){ if(pages.length > 1){ ops = p; text('Page ' + (i+1) + ' of ' + pages.length, W - M, H - M + 10, 8, false, 'right'); } });
+
+  // assemble the file
+  var objs = [];
+  objs[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+  objs[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
+  objs[4] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>';
+  var kids = [];
+  pages.forEach(function(p, i){
+    var pageId = 5 + i*2, contId = 6 + i*2;
+    var stream = p.join('\n');
+    objs[pageId] = '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + W + ' ' + H + '] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ' + contId + ' 0 R >>';
+    objs[contId] = '<< /Length ' + stream.length + ' >>\nstream\n' + stream + '\nendstream';
+    kids.push(pageId + ' 0 R');
+  });
+  objs[2] = '<< /Type /Pages /Kids [' + kids.join(' ') + '] /Count ' + pages.length + ' >>';
+  var out = '%PDF-1.4\n%\xE2\xE3\xCF\xD3\n', offsets = [];
+  for(var n = 1; n < objs.length; n++){ offsets[n] = out.length; out += n + ' 0 obj\n' + objs[n] + '\nendobj\n'; }
+  var xref = out.length;
+  out += 'xref\n0 ' + objs.length + '\n0000000000 65535 f \n';
+  for(n = 1; n < objs.length; n++) out += ('0000000000' + offsets[n]).slice(-10) + ' 00000 n \n';
+  out += 'trailer\n<< /Size ' + objs.length + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF';
+  var bytes = new Uint8Array(out.length);
+  for(n = 0; n < out.length; n++) bytes[n] = out.charCodeAt(n) & 255;
+  return bytes;
+}
+function downloadRosterPdf(){
+  var viewed = resolveViewedWeek();
+  var bytes = buildRosterPdf(viewed.key);
+  var blob = new Blob([bytes], {type:'application/pdf'});
+  var name = (STATE.title || 'Roster') + ' ' + viewed.weekLabel.replace(/[\\/:*?"<>|]/g, '') + '.pdf';
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 30000);
+  toast(ui.edits && ui.edits[viewed.key] ? 'PDF downloaded (published shifts only — publish your changes first to include them).' : 'PDF downloaded.');
+}
+
 function findShiftInWeek(weekKey, dayKey, staffId){
   var arr = gridShifts(weekKey);
   return arr.find(function(s){ return s.staffId===staffId && s.day===dayKey; }) ||
@@ -1538,10 +1659,10 @@ function renderFullWeek(){
     '</div>' +
     '<button class="ghost-btn" data-action="week-next">Next ›</button>' +
   '</div>';
-  if(!viewed.isActive){
-    out += '<button class="ghost-btn" data-action="week-jump-active" style="display:block; margin:0 auto 14px;">Jump to live week</button>';
-  }
-
+  out += '<div style="display:flex; justify-content:center; gap:8px; flex-wrap:wrap; margin:0 0 14px;">' +
+    '<button class="ghost-btn" data-action="download-pdf">⬇ Download PDF</button>' +
+    (!viewed.isActive ? '<button class="ghost-btn" data-action="week-jump-active">Jump to live week</button>' : '') +
+  '</div>';
   out += '<div class="legend">' +
     '<span><span class="dot" style="background:var(--status-pending);"></span>Awaiting response</span>' +
     '<span><span class="dot" style="background:var(--status-confirmed);"></span>Confirmed</span>' +
@@ -1593,8 +1714,9 @@ function renderFullWeek(){
           ? '<td><span class="cell-shift clickable ed-removed" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="Removed (not published yet)">removed</span></td>'
           : (function(){
               var ds = dayStatus(s.id, viewed.key, d.key);
-              var cls = ds ? (ds.kind==='limited' ? ' cell-limited' : ' cell-off') : '';
-              var inner = ds ? (ds.kind==='limited' ? '+<span class="cell-avail">' + esc(ds.short) + '</span>' : esc(ds.short)) : '+';
+              if(ds && ds.kind==='limited') ds = null;   // limited hours aren't shown on the grid
+              var cls = ds ? ' cell-off' : '';
+              var inner = ds ? esc(ds.short) : '+';
               return '<td><span class="cell-shift clickable cell-empty' + cls + '" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="' + esc(ds ? s.name + ': ' + ds.reason : 'Add a shift for ' + s.name) + '">' + inner + '</span></td>';
             })();
       } else {
@@ -2222,6 +2344,7 @@ function onClick(e){
     if(msgStaff) document.getElementById('detailBox').innerHTML = notifyPanelHTML(ctxMsg, msgStaff, msgShift);
     return;
   }
+  if(action==='download-pdf'){ downloadRosterPdf(); return; }
   if(action==='toggle-copy-mode'){ ui.copyMode = !ui.copyMode; ui.brush = null; render(); return; }
   if(action==='clear-brush'){ ui.brush = null; render(); return; }
   if(action==='edits-undo'){
