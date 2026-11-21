@@ -222,14 +222,15 @@
   .status-confirmed{background:var(--status-confirmed-soft); color:var(--status-confirmed);}
   .status-open{background:var(--status-open-soft); color:var(--status-open);}
 
+  /* Tabs wrap onto extra rows instead of squashing (phones, large text). */
   .tabs{
-    display:flex; gap:4px; background:var(--surface-2); padding:4px; border-radius:12px;
-    margin-bottom:16px; overflow-x:auto;
+    display:flex; flex-wrap:wrap; gap:4px; background:var(--surface-2); padding:4px; border-radius:12px;
+    margin-bottom:16px;
   }
   .tab-btn{
-    flex:1 1 auto; white-space:nowrap; text-align:center; padding:9px 6px; border-radius:9px;
+    flex:1 0 auto; white-space:nowrap; text-align:center; padding:9px 10px; border-radius:9px;
     border:none; background:transparent; color:var(--ink-soft); font-weight:700; font-size:0.76rem;
-    cursor:pointer; min-width:0; transition:background 0.15s ease, color 0.15s ease;
+    cursor:pointer; min-width:max-content; transition:background 0.15s ease, color 0.15s ease;
   }
   .tab-btn.active{
     background:var(--surface); color:var(--accent-strong); box-shadow:var(--shadow);
@@ -365,7 +366,11 @@
   .avail-row{display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 0; border-bottom:1px solid var(--border);}
   .avail-row:last-child{border-bottom:none;}
   .avail-day{font-weight:700; font-size:0.86rem; min-width:44px;}
-  .seg{display:flex; gap:4px; background:var(--surface-2); padding:3px; border-radius:9px;}
+  .week-nav .ghost-btn{white-space:nowrap;}
+  .cell-req{border:1.5px dashed var(--accent); background:var(--accent-soft); color:var(--ink); font-size:0.66rem; font-weight:700; line-height:1.2;}
+  .req-list .req-row{display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap; padding:9px 0; border-bottom:1px solid var(--border);}
+  .req-list .req-row:last-child{border-bottom:none;}
+  .seg{display:flex; flex-wrap:wrap; gap:4px; background:var(--surface-2); padding:3px; border-radius:9px;}
   .seg button{border:none; background:transparent; padding:6px 9px; border-radius:7px; font-size:0.72rem; font-weight:700; color:var(--ink-soft); cursor:pointer;}
   .seg button.on-available{background:var(--status-confirmed-soft); color:var(--status-confirmed);}
   .seg button.on-unavailable{background:var(--status-open-soft); color:var(--status-open);}
@@ -474,6 +479,7 @@ function normalizeState(st){
   // at the top level (STATE.days/STATE.shifts/STATE.weekLabel), unchanged.
   st.weeks = st.weeks || {};
   st.roleInfo = st.roleInfo || {};
+  st.shiftRequests = st.shiftRequests || [];
   st.staff.forEach(normalizeRates);
   // Dashboard data only arrives for the admin (staff get their own part via ui.myDash).
   if(st.clock){
@@ -665,8 +671,77 @@ function openShifts(){
 // (kept as 'rejected' so the staff member sees it was declined, until they
 // dismiss it). Never carries into a new week -- "Start new week" rebuilds
 // fresh shift objects without this field.
+function upcomingWeekKeys(){
+  var live = weekStartKey();
+  return Object.keys(STATE.weeks || {}).filter(function(k){ return k > live; }).sort();
+}
+// A shift by id in the live week or any saved/planned week.
+function findShiftAnywhere(id){
+  var keys = [weekStartKey()].concat(Object.keys(STATE.weeks || {}));
+  for(var i = 0; i < keys.length; i++){
+    var s = weekShiftsReadOnly(keys[i]).find(function(x){ return x.id===id; });
+    if(s) return {shift:s, week:keys[i], day: weekDaysFor(keys[i]).find(function(d){ return d.key===s.day; }) || {label:s.day, date:'', iso:''}};
+  }
+  return null;
+}
+// Change requests waiting on the admin, this week and coming weeks.
 function pendingEditRequests(){
-  return STATE.shifts.filter(function(s){ return s.editRequest && s.editRequest.status==='pending'; });
+  var out = [];
+  [weekStartKey()].concat(upcomingWeekKeys()).forEach(function(k){
+    weekShiftsReadOnly(k).forEach(function(s){
+      if(s.editRequest && s.editRequest.status==='pending') out.push({shift:s, week:k, day: weekDaysFor(k).find(function(d){ return d.key===s.day; }) || {label:s.day, date:''}});
+    });
+  });
+  return out;
+}
+function pendingShiftRequests(){
+  return (STATE.shiftRequests || []).filter(function(r){ return r.status==='pending'; })
+    .sort(function(a, b){ return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+}
+function shiftRequestFor(staffId, iso){
+  return (STATE.shiftRequests || []).find(function(r){ return r.staffId===staffId && r.date===iso && r.status==='pending'; }) || null;
+}
+// Which roster week a calendar date belongs to (weeks line up with the live week).
+function weekKeyForDate(iso){
+  var live = weekStartKey();
+  var known = [live].concat(Object.keys(STATE.weeks || {})).find(function(k){ return weekDaysFor(k).some(function(d){ return d.iso===iso; }); });
+  if(known) return known;
+  var diff = Math.round((new Date(iso + 'T00:00:00') - new Date(live + 'T00:00:00')) / 86400000);
+  return addDaysISO(live, 7 * Math.floor(diff / 7));
+}
+function dayKeyForDate(iso){ return WEEKDAY_ABBR[new Date(iso + 'T00:00:00').getDay()]; }
+function fmtDayDate(iso){ var d = new Date(iso + 'T00:00:00'); return WEEKDAY_LABEL[WEEKDAY_ABBR[d.getDay()]] + ' ' + d.getDate() + ' ' + MONTH_ABBR[d.getMonth()]; }
+function xsFormHTML(date){
+  var min = todayISO();
+  var times = commonTimes(weekKeyForDate(date || min));
+  return '<h2 class="section-title" style="font-size:0.95rem;">Ask to work an extra shift</h2>' +
+    '<p class="section-sub">For when the shop is busy and you can help. This adds a new shift (it isn\'t covering someone). Your manager approves it before it goes on the roster.</p>' +
+    '<label class="field-label">Day</label><input type="date" id="xsDate" min="' + min + '" value="' + esc(date || min) + '">' +
+    '<label class="field-label">Quick times</label><div class="time-chips">' + times.map(function(c){
+      return '<button type="button" class="time-chip" data-action="xs-chip" data-start="' + c.start + '" data-end="' + c.end + '">' + fmtTime(c.start) + '–' + fmtTime(c.end) + '</button>'; }).join('') + '</div>' +
+    '<div style="display:flex; gap:10px;"><div style="flex:1;"><label class="field-label">Start</label><input type="time" id="xsStart" value="09:00"></div>' +
+    '<div style="flex:1;"><label class="field-label">End</label><input type="time" id="xsEnd" value="13:00"></div></div>' +
+    '<label class="field-label">Note for your manager (optional)</label><textarea rows="2" id="xsNote" maxlength="300" placeholder="e.g. Happy to help with the Saturday rush."></textarea>' +
+    '<div class="detail-actions"><button class="btn btn-primary" data-action="xs-submit">Send request</button><button class="btn btn-secondary" data-action="close-detail">Cancel</button></div>';
+}
+function xsViewHTML(r){
+  var who = staffById(r.staffId);
+  var mine = ui.me && r.staffId === ui.me;
+  var rostered = shiftOnDate(r.staffId, r.date);
+  return '<h2 class="section-title" style="font-size:0.95rem;">Extra shift request</h2>' +
+    '<div class="detail-row"><span class="k">Who</span><span>' + esc(who ? who.name : '?') + '</span></div>' +
+    '<div class="detail-row"><span class="k">Day</span><span>' + esc(fmtDayDate(r.date)) + '</span></div>' +
+    '<div class="detail-row"><span class="k">Time</span><span class="mono">' + fmtTime(r.start) + ' – ' + fmtTime(r.end) + '</span></div>' +
+    (r.note ? '<div class="detail-row"><span class="k">Note</span><span>' + esc(r.note) + '</span></div>' : '') +
+    (rostered ? '<div class="detail-row" style="color:var(--status-open); font-weight:700;">⚠ Already rostered ' + fmtTime(rostered.start) + '–' + fmtTime(rostered.end) + ' that day</div>' : '') +
+    '<div class="detail-actions">' +
+      (ui.mgrUnlocked ? '<button class="btn btn-primary" data-action="xs-approve" data-id="' + r.id + '">Approve &amp; add shift</button><button class="btn btn-danger" data-action="xs-decline" data-id="' + r.id + '">Decline</button>' : '') +
+      (mine && !ui.mgrUnlocked ? '<button class="btn btn-secondary" data-action="xs-cancel" data-id="' + r.id + '">Cancel request</button>' : '') +
+      '<button class="btn btn-secondary" data-action="close-detail">Close</button></div>';
+}
+function showDetail(html){
+  document.getElementById('detailBox').innerHTML = html;
+  document.getElementById('detailOverlay').classList.add('show');
 }
 function shiftHours(s){
   var sp = s.start.split(':'); var ep = s.end.split(':');
@@ -1550,7 +1625,16 @@ function findShiftInWeek(weekKey, dayKey, staffId){
 function openCellModal(weekKey, dayKey, staffId){
   ui.cellCtx = {weekKey:weekKey, dayKey:dayKey, staffId:staffId};
   var shift = findShiftInWeek(weekKey, dayKey, staffId);
-  if(!shift && !ui.mgrUnlocked) return; // nothing to show a non-admin for an empty cell
+  if(!shift){
+    var cday = weekDaysFor(weekKey).find(function(d){ return d.key===dayKey; });
+    var preq = cday ? shiftRequestFor(staffId, cday.iso) : null;
+    if(preq && (ui.mgrUnlocked || ui.me===staffId)){ showDetail(xsViewHTML(preq)); return; }
+    if(!ui.mgrUnlocked){
+      // Staff tapping their own empty day: ask to work an extra shift.
+      if(ui.me===staffId && cday && cday.iso >= todayISO()) showDetail(xsFormHTML(cday.iso));
+      return;
+    }
+  }
   var html = (!shift && ui.mgrUnlocked) ? cellEditFormHTML(ui.cellCtx, null) : cellViewHTML(ui.cellCtx, shift);
   document.getElementById('detailBox').innerHTML = html;
   document.getElementById('detailOverlay').classList.add('show');
@@ -1579,10 +1663,11 @@ function cellViewHTML(ctx, shift){
   } else if(isActiveWeek && ui.me && shift.staffId===ui.me && shift.status==='confirmed'){
     actions += '<button class="btn btn-secondary" data-action="detail-release" data-shift="' + shift.id + '">Release this shift</button>';
   }
-  if(isActiveWeek && ui.me && shift.staffId===ui.me && (shift.status==='pending' || shift.status==='confirmed')){
+  var notPast = ctx.weekKey >= weekStartKey() && day && day.iso >= todayISO();
+  if(notPast && ui.me && shift.staffId===ui.me && (shift.status==='pending' || shift.status==='confirmed')){
     actions += editRequestActionsHTML(shift);
   }
-  if(ui.mgrUnlocked && isActiveWeek && shift.editRequest && shift.editRequest.status==='pending'){
+  if(ui.mgrUnlocked && shift.editRequest && shift.editRequest.status==='pending'){
     html += '<div class="detail-row" style="color:var(--status-pending); font-weight:700;">✎ Asked to change to ' + fmtTime(shift.editRequest.start) + '–' + fmtTime(shift.editRequest.end) + (shift.editRequest.note ? ' — "' + esc(shift.editRequest.note) + '"' : '') + '</div>';
     actions += '<button class="btn btn-primary" data-action="approve-edit-request" data-shift="' + shift.id + '">Approve change</button>' +
       '<button class="btn btn-danger" data-action="reject-edit-request" data-shift="' + shift.id + '">Decline change</button>';
@@ -1913,7 +1998,7 @@ var TABS = [
   {key:'times', label:'Timesheets'}
 ];
 function renderTabs(){
-  var pendingCount = ui.mgrUnlocked ? pendingEditRequests().length : 0;
+  var pendingCount = ui.mgrUnlocked ? pendingEditRequests().length + pendingShiftRequests().length : 0;
   return '<nav class="tabs">' + TABS.filter(function(t){ return (t.key!=='budget' && t.key!=='times') || ui.mgrUnlocked; }).map(function(t){
     var label = esc(t.label);
     if(t.key==='mgr' && pendingCount) label += '<span class="tab-badge">' + pendingCount + '</span>';
@@ -2065,7 +2150,7 @@ function shiftRoleBadge(shift){
 
 function shiftCardHTML(shift, opts){
   opts = opts || {};
-  var day = dayByKey(shift.day);
+  var day = opts.weekKey ? (weekDaysFor(opts.weekKey).find(function(d){ return d.key===shift.day; }) || dayByKey(shift.day)) : dayByKey(shift.day);
   var st = statusInfo(shift);
   var assignee = shift.staffId ? staffById(shift.staffId) : null;
   var original = shift.originalStaffId ? staffById(shift.originalStaffId) : null;
@@ -2088,6 +2173,7 @@ function shiftCardHTML(shift, opts){
     }
     actions += editRequestActionsHTML(shift);
   }
+  if(opts.mineFuture) actions = editRequestActionsHTML(shift);
   if(opts.claimAction && shift.status==='open'){
     if(ui.me && !canClaim(shift)){
       actions = '<div class="shift-actions"><span class="badge status-pending">🔒 ' + esc(claimOnlyLabel(shift)) + '</span></div>';
@@ -2097,8 +2183,8 @@ function shiftCardHTML(shift, opts){
     }
   }
   var conflictLine = '';
-  if(opts.mineActions){
-    var myConflict = availabilityConflict(shift);
+  if(opts.mineActions || opts.mineFuture){
+    var myConflict = availabilityConflict(shift, opts.weekKey);
     if(myConflict) conflictLine = '<div class="shift-meta" style="margin-top:2px;">' + conflictBadgeHTML(myConflict) + '</div>';
   }
   return '<div class="card shift-card">' +
@@ -2134,13 +2220,13 @@ function editRequestActionsHTML(shift){
   return '<div class="shift-actions"><button class="btn btn-secondary" data-action="request-edit" data-shift="' + shift.id + '">Request a shift change</button></div>';
 }
 function openEditRequestModal(id){
-  var s = STATE.shifts.find(function(x){ return x.id===id; });
+  var f = findShiftAnywhere(id), s = f && f.shift;
   if(!s || s.staffId !== ui.me) return;
-  document.getElementById('detailBox').innerHTML = editRequestFormHTML(s);
+  document.getElementById('detailBox').innerHTML = editRequestFormHTML(s, f.day);
   document.getElementById('detailOverlay').classList.add('show');
 }
-function editRequestFormHTML(shift){
-  var day = dayByKey(shift.day);
+function editRequestFormHTML(shift, day){
+  day = day || dayByKey(shift.day);
   return '<div class="detail-row"><span class="k">Day</span><span>' + day.label + ' ' + day.date + '</span></div>' +
     '<div class="detail-row"><span class="k">Current time</span><span class="mono">' + fmtTime(shift.start) + ' – ' + fmtTime(shift.end) + '</span></div>' +
     '<label class="field-label" style="margin-top:10px;">New start</label>' +
@@ -2166,6 +2252,28 @@ function renderMyShifts(){
     out += '<div class="empty">No shifts scheduled for you this week. Check the Availability tab to let the team know when you\'re free.</div>';
   } else {
     out += mine.map(function(s){ return shiftCardHTML(s, {mineActions:true}); }).join('');
+  }
+  // Shifts in weeks that haven't started yet: they can ask for changes now.
+  upcomingWeekKeys().forEach(function(k){
+    var later = weekShiftsReadOnly(k).filter(function(s){ return s.staffId===ui.me; })
+      .sort(function(a, b){ return DAY_KEYS.indexOf(a.day) - DAY_KEYS.indexOf(b.day); });
+    if(!later.length) return;
+    out += '<h2 class="section-title" style="margin-top:22px;">Coming up: ' + esc(weekLabelFor(k)) + '</h2>' +
+      '<p class="section-sub">You can accept these once that week starts. Need a different time? Request a change now.</p>' +
+      later.map(function(s){ return shiftCardHTML(s, {mineFuture:true, weekKey:k}); }).join('');
+  });
+  // Extra shifts
+  var myReqs = (STATE.shiftRequests || []).filter(function(r){ return r.staffId===ui.me; }).sort(function(a, b){ return a.date < b.date ? -1 : 1; });
+  out += '<h2 class="section-title" style="margin-top:22px;">Extra shifts</h2>' +
+    '<p class="section-sub">Shop busy and you can help? Ask to work a day you\'re not rostered. You can also tap one of your empty days in the Week tab. Your manager approves it first.</p>' +
+    '<button class="btn btn-primary" data-action="xs-open">+ Ask to work an extra shift</button>';
+  if(myReqs.length){
+    out += '<div class="card req-list" style="margin-top:10px;">' + myReqs.map(function(r){
+      var label = r.status==='pending' ? '<span class="badge status-pending">Waiting for approval</span>' : r.status==='approved' ? '<span class="badge status-confirmed">Approved ✓ It\'s on the roster</span>' : '<span class="badge status-open">Declined</span>';
+      return '<div class="req-row"><div style="flex:1 1 200px;"><strong>' + esc(fmtDayDate(r.date)) + '</strong> · <span class="mono">' + fmtTime(r.start) + '–' + fmtTime(r.end) + '</span><div style="margin-top:4px;">' + label + '</div>' +
+        (r.note ? '<div class="dash-meta">"' + esc(r.note) + '"</div>' : '') + '</div>' +
+        '<button class="btn btn-secondary" data-action="' + (r.status==='pending' ? 'xs-cancel' : 'xs-dismiss') + '" data-id="' + r.id + '">' + (r.status==='pending' ? 'Cancel' : 'Dismiss') + '</button></div>';
+    }).join('') + '</div>';
   }
   var open = openShifts().filter(function(s){ return s.staffId !== ui.me; });
   out += '<h2 class="section-title" style="margin-top:22px;">Open shifts you could pick up</h2>' +
@@ -2236,15 +2344,18 @@ function renderFullWeek(){
       if(isBrush) edCls += ' brush-src';
       if(sh){
         var cellConflict = availabilityConflict(sh, viewed.key);
-        var hasReq = isAdmin && viewed.isActive && sh.editRequest && sh.editRequest.status==='pending';
+        var hasReq = sh.editRequest && sh.editRequest.status==='pending' && (isAdmin || sh.staffId===ui.me);
         var csty = cellStatusStyle(sh.status);
         var cellBorder = cellConflict ? 'box-shadow:inset 0 0 0 2px var(--status-open);' : '';
         var titleText = statusInfo(sh).label + (cellConflict ? ' — ' + cellConflict.reason : '') +
-          (isAdmin && viewed.isActive && sh.editRequest && sh.editRequest.status==='pending' ? ' — asked to change to ' + fmtTime(sh.editRequest.start) + '–' + fmtTime(sh.editRequest.end) : '');
+          (hasReq ? ' — asked to change to ' + fmtTime(sh.editRequest.start) + '–' + fmtTime(sh.editRequest.end) : '');
         rows += '<td><span class="cell-shift clickable' + edCls + '" data-filled="1" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" style="background:' + csty.bg + '; color:' + csty.fg + ';' + cellBorder + '" title="' + esc(titleText + (edState ? ' (not published yet)' : '')) + '">' +
           '<span class="cell-time mono">' + (cellConflict ? '⚠ ' : '') + (hasReq ? '✎ ' : '') + fmtTime(sh.start) + '–' + fmtTime(sh.end) + '</span>' +
           '<span class="cell-role">' + esc(roleLabel(shiftRole(sh))) + '</span>' +
         '</span></td>';
+      } else if(shiftRequestFor(s.id, d.iso) && (isAdmin || ui.me===s.id)){
+        var xr = shiftRequestFor(s.id, d.iso);
+        rows += '<td><span class="cell-shift clickable cell-req" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="Asked to work ' + fmtTime(xr.start) + '–' + fmtTime(xr.end) + ' (waiting for approval)">✋ Asked<br>' + fmtTime(xr.start) + '–' + fmtTime(xr.end) + '</span></td>';
       } else if(isAdmin){
         rows += edState === 'removed'
           ? '<td><span class="cell-shift clickable ed-removed" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="Removed (not published yet)">removed</span></td>'
@@ -2255,6 +2366,8 @@ function renderFullWeek(){
               var inner = ds ? esc(ds.short) : '+';
               return '<td><span class="cell-shift clickable cell-empty' + cls + '" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="' + esc(ds ? s.name + ': ' + ds.reason : 'Add a shift for ' + s.name) + '">' + inner + '</span></td>';
             })();
+      } else if(ui.me===s.id && d.iso >= todayISO()){
+        rows += '<td><span class="cell-shift clickable cell-empty" data-action="grid-cell" data-week="' + viewed.key + '" data-day="' + d.key + '" data-staff="' + s.id + '" title="Ask to work an extra shift this day">+</span></td>';
       } else {
         rows += '<td><span class="cell-dash">–</span></td>';
       }
@@ -2447,29 +2560,36 @@ function renderManager(){
       '<button class="btn btn-secondary" data-action="test-notify">Send test email</button>' +
     '</div></div>';
 
-  var pendingReqs = pendingEditRequests();
-  out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">Shift change requests' +
-    (pendingReqs.length ? '<span class="tab-badge" style="margin-left:6px;">' + pendingReqs.length + '</span>' : '') + '</h2>' +
-    '<p class="section-sub" style="margin-bottom:10px;">When someone edits their own shift — say they pick up an extra hour — it lands here for you to approve or decline before it goes live.</p>';
-  if(!pendingReqs.length){
-    out += '<p class="section-sub" style="margin:0;">No pending requests right now.</p>';
-  } else {
-    pendingReqs.forEach(function(s){
-      var reqDay = dayByKey(s.day);
-      var reqWho = s.staffId ? staffById(s.staffId) : null;
-      out += '<div class="mgr-shift-row" style="align-items:flex-start;">' +
-        '<div style="flex:1 1 220px; font-size:0.84rem; line-height:1.5;">' +
-          '<strong>' + esc(reqWho ? reqWho.name : '') + '</strong> · ' + reqDay.label + ' ' + reqDay.date + '<br>' +
-          '<span class="mono">' + fmtTime(s.start) + '–' + fmtTime(s.end) + '</span> → <span class="mono">' + fmtTime(s.editRequest.start) + '–' + fmtTime(s.editRequest.end) + '</span>' +
-          (s.editRequest.note ? '<div style="color:var(--ink-soft); margin-top:2px;">"' + esc(s.editRequest.note) + '"</div>' : '') +
-        '</div>' +
-        '<div style="display:flex; gap:8px;">' +
-          '<button class="btn btn-primary" data-action="approve-edit-request" data-shift="' + s.id + '">Approve</button>' +
-          '<button class="btn btn-danger" data-action="reject-edit-request" data-shift="' + s.id + '">Decline</button>' +
-        '</div>' +
-      '</div>';
-    });
-  }
+  var pendingReqs = pendingEditRequests(), extraReqs = pendingShiftRequests();
+  var reqTotal = pendingReqs.length + extraReqs.length;
+  out += '<div class="card"><h2 class="section-title" style="font-size:0.9rem;">Shift requests' +
+    (reqTotal ? '<span class="tab-badge" style="margin-left:6px;">' + reqTotal + '</span>' : '') + '</h2>' +
+    '<p class="section-sub" style="margin-bottom:10px;">Staff asking to change a shift (any week) or to work an extra shift when it\'s busy. Nothing changes on the roster until you approve it.</p>';
+  if(!reqTotal) out += '<p class="section-sub" style="margin:0;">No pending requests right now.</p>';
+  pendingReqs.forEach(function(q){
+    var s = q.shift, reqWho = s.staffId ? staffById(s.staffId) : null;
+    out += '<div class="mgr-shift-row" style="align-items:flex-start;">' +
+      '<div style="flex:1 1 220px; font-size:0.84rem; line-height:1.5;"><span class="badge status-pending">Change</span> ' +
+        '<strong>' + esc(reqWho ? reqWho.name : '') + '</strong> · ' + esc(q.day.label + ' ' + q.day.date) + '<br>' +
+        '<span class="mono">' + fmtTime(s.start) + '–' + fmtTime(s.end) + '</span> → <span class="mono">' + fmtTime(s.editRequest.start) + '–' + fmtTime(s.editRequest.end) + '</span>' +
+        (s.editRequest.note ? '<div style="color:var(--ink-soft); margin-top:2px;">"' + esc(s.editRequest.note) + '"</div>' : '') +
+      '</div><div style="display:flex; gap:8px;">' +
+        '<button class="btn btn-primary" data-action="approve-edit-request" data-shift="' + s.id + '">Approve</button>' +
+        '<button class="btn btn-danger" data-action="reject-edit-request" data-shift="' + s.id + '">Decline</button>' +
+      '</div></div>';
+  });
+  extraReqs.forEach(function(r){
+    var who = staffById(r.staffId), already = shiftOnDate(r.staffId, r.date);
+    out += '<div class="mgr-shift-row" style="align-items:flex-start;">' +
+      '<div style="flex:1 1 220px; font-size:0.84rem; line-height:1.5;"><span class="badge status-confirmed">Extra shift</span> ' +
+        '<strong>' + esc(who ? who.name : '?') + '</strong> · ' + esc(fmtDayDate(r.date)) + '<br><span class="mono">' + fmtTime(r.start) + '–' + fmtTime(r.end) + '</span>' +
+        (r.note ? '<div style="color:var(--ink-soft); margin-top:2px;">"' + esc(r.note) + '"</div>' : '') +
+        (already ? '<div style="color:var(--status-open); font-weight:700;">⚠ Already rostered ' + fmtTime(already.start) + '–' + fmtTime(already.end) + ' that day</div>' : '') +
+      '</div><div style="display:flex; gap:8px;">' +
+        '<button class="btn btn-primary" data-action="xs-approve" data-id="' + r.id + '">Approve</button>' +
+        '<button class="btn btn-danger" data-action="xs-decline" data-id="' + r.id + '">Decline</button>' +
+      '</div></div>';
+  });
   out += '</div>';
 
   out += renderConflictsOverview() +
@@ -2773,16 +2893,67 @@ function onClick(e){
     } else { legacyCopy(); }
     return;
   }
+  if(action==='xs-open'){ if(!ui.me){ toast('Log in first.'); return; } showDetail(xsFormHTML(null)); return; }
+  if(action==='xs-chip'){ document.getElementById('xsStart').value = el.getAttribute('data-start'); document.getElementById('xsEnd').value = el.getAttribute('data-end'); return; }
+  if(action==='xs-submit'){
+    if(!ui.me){ toast('Log in first.'); return; }
+    var xsDate = document.getElementById('xsDate').value, xsStart = document.getElementById('xsStart').value, xsEnd = document.getElementById('xsEnd').value;
+    var xsNote = document.getElementById('xsNote').value.trim().slice(0, 300);
+    if(!xsDate){ toast('Pick a day.'); return; }
+    if(xsDate < todayISO()){ toast('Pick today or a day coming up.'); return; }
+    if(!xsStart || !xsEnd){ toast('Set a start and end time.'); return; }
+    if(xsEnd <= xsStart){ toast('End time needs to be after the start time.'); return; }
+    var xsOn = shiftOnDate(ui.me, xsDate);
+    if(xsOn){ toast('You\'re already rostered that day (' + fmtTime(xsOn.start) + '–' + fmtTime(xsOn.end) + '). Ask to change that shift instead.'); return; }
+    if(shiftRequestFor(ui.me, xsDate)){ toast('You\'ve already asked to work that day.'); return; }
+    var xsId = 'sr_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    STATE.shiftRequests.push({id: xsId, staffId: ui.me, date: xsDate, start: xsStart, end: xsEnd, note: xsNote, status: 'pending', at: new Date().toISOString()});
+    hideDetail(); render();
+    staffSave('shift-request', {id: xsId, date: xsDate, start: xsStart, end: xsEnd, note: xsNote}, 'Request sent. Your manager will approve it.', {
+      request: 'Hi, it\'s ' + staffNameMe() + '. I can work an extra shift on ' + fmtDayDate(xsDate) + ', ' + fmtTime(xsStart) + '–' + fmtTime(xsEnd) + ', if it helps.' + (xsNote ? '\nNote: ' + xsNote : '')
+    });
+    return;
+  }
+  if(action==='xs-cancel' || action==='xs-dismiss'){
+    var xcId = el.getAttribute('data-id');
+    STATE.shiftRequests = STATE.shiftRequests.filter(function(r){ return r.id !== xcId; });
+    hideDetail(); render();
+    staffSave(action==='xs-cancel' ? 'shift-request-cancel' : 'shift-request-dismiss', {id: xcId}, action==='xs-cancel' ? 'Request cancelled.' : '');
+    return;
+  }
+  if(action==='xs-approve' || action==='xs-decline'){
+    var xaId = el.getAttribute('data-id');
+    var xa = (STATE.shiftRequests || []).find(function(r){ return r.id===xaId; });
+    if(!xa) return;
+    var xaWho = staffById(xa.staffId);
+    if(action==='xs-approve'){
+      var xaOn = shiftOnDate(xa.staffId, xa.date);
+      if(xaOn){ toast((xaWho ? xaWho.name : 'They') + ' is already rostered that day. Edit that shift in the Week tab instead.'); return; }
+    }
+    hideDetail();
+    adminCommit(function(){
+      var r = (STATE.shiftRequests || []).find(function(x){ return x.id===xaId; });
+      if(!r || r.status !== 'pending') return;
+      if(action==='xs-decline'){ r.status = 'declined'; r.answeredAt = new Date().toISOString(); return; }
+      var wk = weekKeyForDate(r.date), dk = dayKeyForDate(r.date);
+      var arr = getWeekShiftsArray(wk);
+      if(arr.some(function(s){ return s.staffId===r.staffId && s.day===dk; })) return;
+      var who = staffById(r.staffId);
+      arr.push({id: newShiftId(), staffId: r.staffId, originalStaffId: r.staffId, day: dk, start: r.start, end: r.end, role: who ? who.role : 'retail', status: 'confirmed'});
+      r.status = 'approved'; r.answeredAt = new Date().toISOString();
+    }, action==='xs-approve' ? 'Extra shift added for ' + (xaWho ? xaWho.name : 'them') + '.' : 'Request declined.');
+    return;
+  }
   if(action==='request-edit'){ openEditRequestModal(el.getAttribute('data-shift')); return; }
   if(action==='submit-edit-request'){
-    var reqShift = STATE.shifts.find(function(x){ return x.id===el.getAttribute('data-shift'); });
+    var reqFound = findShiftAnywhere(el.getAttribute('data-shift')), reqShift = reqFound && reqFound.shift;
     if(!reqShift || reqShift.staffId !== ui.me){ hideDetail(); return; }
     var reqStart = document.getElementById('reqStart').value;
     var reqEnd = document.getElementById('reqEnd').value;
     var reqNote = document.getElementById('reqNote').value.trim();
     if(!reqStart || !reqEnd){ toast('Set a start and end time.'); return; }
     if(reqEnd <= reqStart){ toast('End time needs to be after the start time.'); return; }
-    var reqText = 'Hi, it\'s ' + staffNameMe() + ' — can my shift on ' + shiftDesc(reqShift) + ' be changed to ' +
+    var reqText = 'Hi, it\'s ' + staffNameMe() + ' — can my shift on ' + reqFound.day.label + ' ' + reqFound.day.date + ' (' + fmtTime(reqShift.start) + '–' + fmtTime(reqShift.end) + ') be changed to ' +
       fmtTime(reqStart) + '–' + fmtTime(reqEnd) + '?' + (reqNote ? '\nNote: ' + reqNote : '');
     reqShift.editRequest = {start:reqStart, end:reqEnd, note:reqNote, status:'pending'};
     hideDetail();
@@ -2791,7 +2962,7 @@ function onClick(e){
     return;
   }
   if(action==='cancel-edit-request'){
-    var cancelShift = STATE.shifts.find(function(x){ return x.id===el.getAttribute('data-shift'); });
+    var cancelShift = (findShiftAnywhere(el.getAttribute('data-shift')) || {}).shift;
     if(cancelShift && cancelShift.staffId===ui.me && cancelShift.editRequest){
       delete cancelShift.editRequest;
       render();
@@ -2800,7 +2971,7 @@ function onClick(e){
     return;
   }
   if(action==='dismiss-edit-request'){
-    var dismissShift = STATE.shifts.find(function(x){ return x.id===el.getAttribute('data-shift'); });
+    var dismissShift = (findShiftAnywhere(el.getAttribute('data-shift')) || {}).shift;
     if(dismissShift && dismissShift.staffId===ui.me && dismissShift.editRequest){
       delete dismissShift.editRequest;
       render();
@@ -2810,11 +2981,11 @@ function onClick(e){
   }
   if(action==='approve-edit-request'){
     hideDetail();
-    var apprShift = STATE.shifts.find(function(x){ return x.id===el.getAttribute('data-shift'); });
+    var apprFound = findShiftAnywhere(el.getAttribute('data-shift')), apprShift = apprFound && apprFound.shift;
     var apprId = el.getAttribute('data-shift');
     if(apprShift && apprShift.editRequest){
       adminCommit(function(){
-        var s = STATE.shifts.find(function(x){ return x.id===apprId; });
+        var s = getWeekShiftsArray(apprFound.week).find(function(x){ return x.id===apprId; });
         if(!s || !s.editRequest || s.editRequest.status!=='pending') return;
         s.start = s.editRequest.start;
         s.end = s.editRequest.end;
@@ -2825,11 +2996,11 @@ function onClick(e){
   }
   if(action==='reject-edit-request'){
     hideDetail();
-    var rejShift = STATE.shifts.find(function(x){ return x.id===el.getAttribute('data-shift'); });
+    var rejFound = findShiftAnywhere(el.getAttribute('data-shift')), rejShift = rejFound && rejFound.shift;
     var rejId = el.getAttribute('data-shift');
     if(rejShift && rejShift.editRequest){
       adminCommit(function(){
-        var s = STATE.shifts.find(function(x){ return x.id===rejId; });
+        var s = getWeekShiftsArray(rejFound.week).find(function(x){ return x.id===rejId; });
         if(s && s.editRequest && s.editRequest.status==='pending') s.editRequest.status = 'rejected';
       }, 'Shift change declined.');
     }
